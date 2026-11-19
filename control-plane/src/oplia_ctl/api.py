@@ -11,11 +11,17 @@ GET  /proposals/{id}                  detail (operator/approver)
 POST /proposals/{id}/approve          approver
 POST /proposals/{id}/reject           approver
 POST /proposals/{id}/execute          operator (runs the registered executor through the gate)
+POST /webhooks/aiops/alert            signed RCA alert -> matrix -> self-healing proposal + PagerDuty/Slack
+POST /webhooks/aiops/alertmanager     Alertmanager webhook (bearer token) -> same engine, one result per alert
+POST /webhooks/aiops/prediction       signed predictive risk -> escalation schedule
+GET  /aiops/predictions               list scheduled/escalated predictions (operator/approver)
+POST /aiops/predictions/{id}/cancel   operator/approver: withdraw a scheduled prediction
 POST /kill-switch                     approver: engage/release
 GET  /audit/verify                    approver: verify the audit hash chain
 """
 
 
+import hmac
 import json
 from collections.abc import Callable
 from typing import Annotated, Any
@@ -24,6 +30,11 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import text
 
+from oplia_ctl.aiops.alertmanager import to_alerts
+from oplia_ctl.aiops.engine import AIOpsEngine, AlertRejectedError
+from oplia_ctl.aiops.escalation import EscalationScheduler, Prediction, PredictionOutOfWindowError
+from oplia_ctl.aiops.matrix import Alert
+from oplia_ctl.aiops.models import PredictionStatus
 from oplia_ctl.auth import AuthError, OIDCVerifier, Principal, verify_webhook
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
 from oplia_ctl.safety import (
@@ -86,6 +97,9 @@ def create_app(
     approver_role: str,
     operator_role: str,
     soar_exporter: SOARExporter | None = None,
+    aiops_engine: AIOpsEngine | None = None,
+    escalation: EscalationScheduler | None = None,
+    alertmanager_token_secret: str = "alertmanager_webhook_token",  # noqa: S107 - a secret NAME
     db_ping: Callable[[], None] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
@@ -190,6 +204,97 @@ def create_app(
         if not isinstance(raw, dict):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "event must be a JSON object")
         return soar_exporter.process(raw)
+
+    def _validation_422(exc: ValidationError) -> HTTPException:
+        return HTTPException(422, json.loads(exc.json(include_url=False, include_input=False)))
+
+    @app.post("/webhooks/aiops/alert", status_code=status.HTTP_202_ACCEPTED)
+    def aiops_alert(body: Annotated[bytes, Depends(signed_body)]) -> dict[str, Any]:
+        if aiops_engine is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "AIOps engine not configured")
+        try:
+            alert = Alert.model_validate(_json(body))
+        except ValidationError as exc:
+            raise _validation_422(exc) from None
+        try:
+            return aiops_engine.handle(alert)
+        except AlertRejectedError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    async def alertmanager_body(request: Request,
+                                authorization: Annotated[str | None, Header()] = None) -> bytes:
+        try:
+            expected = secrets.get(alertmanager_token_secret)
+        except SecretNotFoundError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "alertmanager token not configured") from None
+        given = authorization[7:].strip() if authorization and authorization.lower().startswith("bearer ") else ""
+        if not given or not hmac.compare_digest(given.encode(), expected.encode()):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid bearer token",
+                                headers={"WWW-Authenticate": "Bearer"})
+        body = await request.body()
+        if len(body) > MAX_WEBHOOK_BYTES:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "payload too large")
+        return body
+
+    @app.post("/webhooks/aiops/alertmanager")
+    def aiops_alertmanager(body: Annotated[bytes, Depends(alertmanager_body)]) -> dict[str, Any]:
+        if aiops_engine is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "AIOps engine not configured")
+        try:
+            converted = to_alerts(_json(body))
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+        results: list[dict[str, Any]] = []
+        for fp, alert, error in converted:
+            if alert is None:
+                results.append({"fingerprint": fp, "outcome": "invalid", "error": error})
+                continue
+            try:
+                results.append({"fingerprint": fp, **aiops_engine.handle(alert)})
+            except AlertRejectedError as exc:
+                results.append({"fingerprint": fp, "outcome": "rejected", "error": str(exc)})
+        return {"results": results}
+
+    @app.post("/webhooks/aiops/prediction", status_code=status.HTTP_202_ACCEPTED)
+    def aiops_prediction(body: Annotated[bytes, Depends(signed_body)]) -> dict[str, Any]:
+        if escalation is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "escalation scheduler not configured")
+        try:
+            prediction = Prediction.model_validate(_json(body))
+        except ValidationError as exc:
+            raise _validation_422(exc) from None
+        try:
+            return escalation.submit(prediction)
+        except PredictionOutOfWindowError as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get("/aiops/predictions")
+    def list_predictions(
+        _: Annotated[Principal, Depends(reader)],
+        status_filter: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if escalation is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "escalation scheduler not configured")
+        st = None
+        if status_filter is not None:
+            try:
+                st = PredictionStatus(status_filter)
+            except ValueError:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown status") from None
+        return escalation.list(st, limit)
+
+    @app.post("/aiops/predictions/{prediction_id}/cancel")
+    def cancel_prediction(prediction_id: str, body: DecisionBody,
+                          p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        if escalation is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "escalation scheduler not configured")
+        try:
+            return escalation.cancel(prediction_id, p.subject, body.note)
+        except LookupError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "prediction not found") from None
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
     # ------------------------------------------------------------ proposals
     @app.get("/proposals")

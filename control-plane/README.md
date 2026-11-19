@@ -77,6 +77,60 @@ identities or data passes through one safety gate.
   * configuration: `OPLIA_LIFECYCLE_AWS_REGIONS`, `OPLIA_LIFECYCLE_AZURE_SUBSCRIPTIONS`
     (JSON lists), `OPLIA_LIFECYCLE_TARGET_CICD`; exit code 2 when any source failed
 
+## Phase 3 components – AIOps self-healing
+
+* **Alert intake** – `POST /webhooks/aiops/alert` (HMAC-signed, normalised JSON) and
+  `POST /webhooks/aiops/alertmanager` (native Prometheus Alertmanager webhook, bearer token from the
+  secret `alertmanager_webhook_token`). Alerts carry one root-cause metric plus correlated metrics.
+  Alerts for another cluster (`OPLIA_AIOPS_CLUSTER_NAME`) or a protected namespace are refused.
+* **Mapping matrix** (`aiops/matrix.py`, replaceable via `OPLIA_AIOPS_MATRIX_PATH`; first match wins):
+
+  | Root cause | Action |
+  |---|---|
+  | p99 latency > 800 ms **and** DB connections ≥ 90 % | runbook `db-connection-pool-flush` |
+  | p99 latency > 800 ms **and** CPU throttling > 25 % (HPA present) | HPA adjustment |
+  | CPU throttling > 25 % (HPA present) | HPA adjustment |
+  | CPU throttling > 25 % (no HPA) | notify only – limits must change in the manifest |
+  | p99 latency > 800 ms, no correlated cause | rolling restart |
+  | memory working set ≥ 90 % of limit, or OOM kills | runbook `memory-cache-clear` |
+  | disk I/O wait > 30 % | runbook `iops-optimize` |
+
+* **Executors** (run only through the safety gate):
+  * rolling restart – the same patch as `kubectl rollout restart` (Deployment/StatefulSet/DaemonSet)
+  * HPA – at `maxReplicas`: raise it by a step, never above the ceiling (default +2, ceiling 50);
+    below max: lower the CPU utilisation target by a step, never below the floor (default −10, floor 40 %).
+    The patch carries `resourceVersion` (concurrent edits fail instead of being overwritten) and the
+    result is re-read and verified.
+  * runbooks – Kubernetes Jobs from an operator-defined registry (`OPLIA_AIOPS_RUNBOOKS_PATH`): image
+    pinned by digest, fixed command, allowed namespaces, credentials only via Kubernetes Secret
+    references; non-root, read-only root FS, no capabilities, deadline, no retries. Alerts never
+    supply commands. Examples: `examples/aiops/runbooks.example.json` (digests must be filled in –
+    placeholders are rejected on load). The control plane refuses to start AIOps if the matrix names
+    a runbook that is not registered.
+* **PagerDuty and Slack before acting** – the incident is sent when the proposal is created
+  (`opened`) and again immediately **before** the executor acts (`pre_action`); the result follows
+  on Slack. If no channel accepts the pre-action message the action is not taken and the proposal
+  is FAILED (`OPLIA_AIOPS_REQUIRE_PRE_ACTION_NOTIFICATION`, default true). PagerDuty Events API v2
+  de-duplicates per workload and rule. Secrets: `pagerduty_routing_key`, `slack_webhook_url`.
+* **De-duplication** – one open proposal per workload and rule; repeats do not page again; after a
+  final state a new proposal is allowed only after the cool-down (default 30 min).
+* **Predictive escalation** – `POST /webhooks/aiops/prediction` accepts risks predicted within the
+  next 4 hours. The escalation matrix routes them ahead of time:
+
+  | Severity | Sent before predicted time | Channels | Min. probability |
+  |---|---|---|---|
+  | critical | 240 min | PagerDuty + Slack | 0.50 |
+  | high | 120 min | PagerDuty + Slack | 0.60 |
+  | medium | 60 min | Slack | 0.60 |
+  | low | 30 min | Slack | 0.75 |
+
+  `oplia-aiops-escalator` (daemon, or `--once` as a CronJob) sends due predictions. Claims are
+  compare-and-set (safe with several replicas); failed channels are retried with back-off, delivered
+  ones are not repeated; after 5 attempts the row is FAILED; a prediction whose time passed while the
+  scheduler was down is marked EXPIRED, not sent late. Delivery is at-least-once.
+* **Monitoring examples** – `examples/aiops/prometheus-rules.example.yaml` (with a `promtool` unit
+  test) and `alertmanager-receiver.yaml`; both are checked in CI with `promtool` / `amtool`.
+
 ## API
 
 | Method | Path | Auth |
@@ -88,6 +142,10 @@ identities or data passes through one safety gate.
 | POST | `/proposals/{id}/execute` | OIDC: operator |
 | POST | `/kill-switch` | OIDC: approver |
 | GET | `/audit/verify` | OIDC: approver |
+| POST | `/webhooks/aiops/alert`, `/webhooks/aiops/prediction` | HMAC |
+| POST | `/webhooks/aiops/alertmanager` | bearer token (`alertmanager_webhook_token`) |
+| GET | `/aiops/predictions` | OIDC: operator or approver |
+| POST | `/aiops/predictions/{id}/cancel` | OIDC: operator or approver |
 
 ## Configuration
 
@@ -115,16 +173,22 @@ OPLIA_DATABASE_URL=postgresql+psycopg://... alembic upgrade head && alembic chec
 uvicorn oplia_ctl.main:app --port 8080                     # API
 oplia-soar-exporter                                        # SOAR daemon
 oplia-iac-lifecycle                                        # TTL scan (CronJob)
+oplia-aiops-escalator [--once]                             # predictive escalation
 ```
 
 ## What is and is not verified
 
 Verified in this repository (and re-run by `.github/workflows/control-plane-ci.yml`):
-lint (ruff), strict type checking (mypy), security scan (bandit), 85 tests on SQLite **and**
-PostgreSQL 16 with the schema built by Alembic, migration up/down and model-drift check.
+lint (ruff), strict type checking (mypy), security scan (bandit), 202 tests on SQLite and 203 on PostgreSQL 16 (one concurrency test runs only on PostgreSQL) with the schema built by Alembic, migration up/down and model-drift check.
 External APIs are exercised with mocks: GitHub/GitLab/Jenkins/SIEM via HTTP mocks, AWS via
 moto, Azure and Kubernetes via fakes; the Azure request bodies were checked against the real
 SDK serializer.
+
+**Phase 3 not yet verified live**: no real Kubernetes API server (fakes with the official
+`kubernetes` client models), no real PagerDuty/Slack (HTTP mocks of the documented APIs), the example
+runbook images/digests are placeholders, and the Prometheus rules use common exporter metric names
+that must be matched to yours. Runbook Jobs are started, not awaited – their outcome is in the Job
+status/logs, not in the proposal result.
 
 **Not yet verified against live systems**: real GitHub/GitLab/Jenkins instances, a real SIEM,
 real AWS/Azure accounts, a real Kubernetes/OpenShift cluster, and the pipeline templates

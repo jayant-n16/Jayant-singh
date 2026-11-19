@@ -51,3 +51,28 @@ def test_ambient_ci_variables_cannot_redirect_remediation(monkeypatch):
     assert s.cicd.gitlab_project_id == ""
     monkeypatch.setenv("OPLIA_CICD__GITHUB_REPOSITORY", "acme/infra")
     assert Settings().cicd.github_repository == "acme/infra"
+
+
+def test_build_with_aiops_enabled(tmp_path, monkeypatch):
+    import json
+
+    from oplia_ctl.aiops.matrix import DEFAULT_MATRIX
+
+    rb = [{"id": i, "description": "d", "image": f"r.example.com/x@sha256:{'b' * 64}", "command": ["true"],
+           "allowed_namespaces": ["shop"]} for i in ("db-connection-pool-flush", "memory-cache-clear", "iops-optimize")]
+    (tmp_path / "rb.json").write_text(json.dumps(rb))
+    monkeypatch.setenv("OPLIA_AIOPS_CLUSTER_NAME", "prod-eks-1")
+    monkeypatch.setenv("OPLIA_AIOPS_RUNBOOKS_PATH", str(tmp_path / "rb.json"))
+    monkeypatch.setenv("OPLIA_AIOPS_ESCALATION_POLICY", json.dumps({
+        s: {"lead_minutes": 30, "channels": ["slack"], "min_probability": 0.5}
+        for s in ("critical", "high", "medium", "low")}))
+    app = build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'a.db'}", **OIDC))
+    client = TestClient(app)
+    assert client.get("/aiops/predictions").status_code == 401  # route exists, auth enforced
+    assert len(DEFAULT_MATRIX) == 8
+
+
+def test_build_with_aiops_but_missing_runbooks_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPLIA_AIOPS_CLUSTER_NAME", "prod-eks-1")
+    with pytest.raises(ValueError, match="unregistered runbooks"):
+        build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'b.db'}", **OIDC))

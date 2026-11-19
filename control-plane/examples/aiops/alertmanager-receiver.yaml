@@ -1,0 +1,21 @@
+# Alertmanager config FRAGMENT for the OPLIA AIOps engine: merge the route and receiver into your config.
+# The token file must contain the same value as the OPLIA secret "alertmanager_webhook_token".
+route:
+  routes:
+    - receiver: oplia-aiops
+      matchers: ['oplia_metric=~".+"']
+      continue: true            # keep your existing human receivers as well
+      group_by: [alertname, namespace, oplia_workload_name]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 1h
+receivers:
+  - name: oplia-aiops
+    webhook_configs:
+      - url: https://oplia.example.com/webhooks/aiops/alertmanager
+        send_resolved: false
+        max_alerts: 50
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /etc/alertmanager/secrets/oplia/token

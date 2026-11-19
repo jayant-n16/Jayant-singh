@@ -39,6 +39,7 @@ dev = [
 
 [project.scripts]
 oplia-soar-exporter = "oplia_ctl.soar.exporter:main"
+oplia-aiops-escalator = "oplia_ctl.aiops.config:escalator_main"
 oplia-iac-lifecycle = "oplia_ctl.lifecycle.manager:main"
 
 [tool.setuptools.packages.find]
@@ -62,6 +63,7 @@ ignore = ["S101"]  # assert is used in tests only
 "tests/*" = ["S105", "S106", "S108", "N803"]
 # Fields ending in *_secret hold the NAME of a secret resolved at runtime, never the secret value.
 "src/oplia_ctl/config.py" = ["S105"]
+"src/oplia_ctl/aiops/config.py" = ["S105"]
 
 [tool.mypy]
 python_version = "3.11"

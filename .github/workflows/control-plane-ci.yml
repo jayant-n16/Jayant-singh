@@ -70,6 +70,45 @@ jobs:
         run: |
           docker run --rm --user 1001 oplia-control-plane:ci python -c "import oplia_ctl.main, oplia_ctl.soar.exporter; print('import ok')"
 
+  monitoring-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: control-plane/examples/aiops
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: download promtool and amtool (checksum verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          for r in "prometheus v3.5.0" "alertmanager v0.28.1"; do
+            set -- $r; v=${2#v}; f=$1-$v.linux-amd64.tar.gz
+            curl -sSfLO "https://github.com/prometheus/$1/releases/download/$2/$f"
+            curl -sSfL "https://github.com/prometheus/$1/releases/download/$2/sha256sums.txt" | grep " $f\$" | sha256sum -c -
+            tar xzf "$f"
+          done
+          echo "$RUNNER_TEMP/prometheus-3.5.0.linux-amd64" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/alertmanager-0.28.1.linux-amd64" >> "$GITHUB_PATH"
+      - name: promtool check and unit-test rules
+        run: |
+          promtool check rules prometheus-rules.example.yaml
+          promtool test rules prometheus-rules.test.yaml
+      - name: amtool check receiver fragment
+        run: |
+          set -euo pipefail
+          printf 'token' > "$RUNNER_TEMP/token"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import sys, yaml
+          d = yaml.safe_load(open("alertmanager-receiver.yaml"))
+          d["route"]["receiver"] = "oplia-aiops"
+          d["receivers"][0]["webhook_configs"][0]["http_config"]["authorization"]["credentials_file"] = sys.argv[1] + "/token"
+          open(sys.argv[1] + "/am.yml", "w").write(yaml.safe_dump(d))
+          PY
+          amtool check-config "$RUNNER_TEMP/am.yml"
+
   terraform:
     runs-on: ubuntu-latest
     timeout-minutes: 15

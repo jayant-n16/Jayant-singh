@@ -7,6 +7,21 @@ from datetime import timedelta
 
 from fastapi import FastAPI
 
+import oplia_ctl.aiops.models  # noqa: F401  (registers the predictions table)
+from oplia_ctl.aiops.config import AIOpsSettings, build_notifier, build_scheduler
+from oplia_ctl.aiops.engine import AIOpsEngine
+from oplia_ctl.aiops.escalation import EscalationScheduler
+from oplia_ctl.aiops.executors import (
+    ACTION_HPA_SCALE,
+    ACTION_ROLLING_RESTART,
+    ACTION_RUNBOOK,
+    K8sHpaScaleExecutor,
+    K8sRollingRestartExecutor,
+    K8sRunbookJobExecutor,
+    NotifyBeforeActExecutor,
+)
+from oplia_ctl.aiops.matrix import load_matrix
+from oplia_ctl.aiops.runbooks import load_runbooks
 from oplia_ctl.api import create_app, sqlalchemy_ping
 from oplia_ctl.auth import OIDCVerifier
 from oplia_ctl.cloud.aws_isolation import AwsInstanceIsolationExecutor
@@ -48,6 +63,28 @@ def build(settings: Settings) -> FastAPI:
         "isolate.azure": AzureNicIsolationExecutor(),
         "isolate.k8s": K8sNamespaceIsolationExecutor(),
     }
+    aiops_cfg = AIOpsSettings()
+    aiops_engine: AIOpsEngine | None = None
+    escalation: EscalationScheduler | None = None
+    if aiops_cfg.cluster_name:
+        sf = make_session_factory(engine)
+        notifier = build_notifier(aiops_cfg, secrets, client)
+        runbooks = load_runbooks(aiops_cfg.runbooks_path)
+        aiops_engine = AIOpsEngine(
+            gate=gate, notifier=notifier, rules=load_matrix(aiops_cfg.matrix_path), runbooks=runbooks,
+            cluster_name=aiops_cfg.cluster_name, cooldown=timedelta(minutes=aiops_cfg.cooldown_minutes),
+            public_base_url=aiops_cfg.public_base_url)
+        escalation = build_scheduler(aiops_cfg, sf, notifier)
+        req = aiops_cfg.require_pre_action_notification
+        executors[ACTION_ROLLING_RESTART] = NotifyBeforeActExecutor(
+            K8sRollingRestartExecutor(), notifier, require_delivery=req)
+        executors[ACTION_HPA_SCALE] = NotifyBeforeActExecutor(
+            K8sHpaScaleExecutor(max_step=aiops_cfg.hpa_max_step, max_ceiling=aiops_cfg.hpa_max_ceiling,
+                                cpu_target_step=aiops_cfg.hpa_cpu_target_step,
+                                cpu_target_floor=aiops_cfg.hpa_cpu_target_floor),
+            notifier, require_delivery=req)
+        executors[ACTION_RUNBOOK] = NotifyBeforeActExecutor(
+            K8sRunbookJobExecutor(runbooks), notifier, require_delivery=req)
     soar_cfg = SOARSettings()
     soar_exporter = None
     if soar_cfg.siem_endpoint:
@@ -70,6 +107,9 @@ def build(settings: Settings) -> FastAPI:
         approver_role=settings.approver_role,
         operator_role=settings.operator_role,
         soar_exporter=soar_exporter,
+        aiops_engine=aiops_engine,
+        escalation=escalation,
+        alertmanager_token_secret=aiops_cfg.alertmanager_token_secret,
         db_ping=sqlalchemy_ping(engine),
     )
 

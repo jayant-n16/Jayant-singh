@@ -297,6 +297,23 @@ class SafetyGate:
             s.flush()
             return _to_proposal(row)
 
+    def latest_by_idempotency_prefix(self, prefix: str) -> tuple[Proposal, str] | None:
+        """Most recent proposal whose idempotency key starts with ``prefix`` (and that key)."""
+        if not prefix:
+            raise ValueError("prefix must not be empty")
+        with session_scope(self._sf) as s:
+            row = s.execute(
+                select(ProposalRow)
+                .where(ProposalRow.idempotency_key.startswith(prefix, autoescape=True))
+                .order_by(ProposalRow.created_at.desc(), ProposalRow.idempotency_key.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            self._expire_if_due(s, row)
+            s.flush()
+            return _to_proposal(row), str(row.idempotency_key)
+
     def list(self, status: ProposalStatus | None = None, limit: int = 100) -> list[Proposal]:
         with session_scope(self._sf) as s:
             q = select(ProposalRow).order_by(ProposalRow.created_at.desc()).limit(min(limit, 500))
