@@ -93,6 +93,30 @@ jobs:
           OPLIA_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/oplia_test
         run: alembic upgrade head && alembic check
 
+  console:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: control-plane/console
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+      - name: Install (lockfile, pinned npm)
+        run: npx -y npm@11.21.1 ci --no-fund
+      - name: Dependency audit
+        run: npx -y npm@11.21.1 audit --audit-level=low
+      - name: Type check (strict)
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npx vite build
+
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 20

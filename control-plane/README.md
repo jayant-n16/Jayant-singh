@@ -23,6 +23,12 @@ identities or data passes through one safety gate.
 `OPLIA_ENVIRONMENT=prod` refuses to start with SQLite, without OIDC, or in autonomous mode
 (no approval + no dry-run) unless `OPLIA_ALLOW_AUTONOMOUS_IN_PROD=true` is set explicitly.
 
+## Admin console
+
+`console/` is the web console (React + TypeScript): proposals, kill switch, audit log, DR breakers,
+FinOps, JIT access, AIOps. Sign-in with Entra ID / Okta (OIDC + PKCE); the API enforces every
+permission. See `console/README.md` to run it locally with the dev login.
+
 ## Try it locally with a login (development only)
 
 `oplia-dev-idp` is a local OIDC login (authorization code + PKCE) so the API - and the admin

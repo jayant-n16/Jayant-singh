@@ -1,0 +1,161 @@
+export interface Me {
+  subject: string;
+  roles: string[];
+  can: { approve: boolean; operate: boolean; read: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean };
+}
+
+export type ProposalStatus =
+  | "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED" | "EXECUTING" | "EXECUTED" | "DRY_RUN" | "FAILED";
+export const PROPOSAL_STATUSES: ProposalStatus[] = [
+  "PENDING", "APPROVED", "EXECUTING", "EXECUTED", "DRY_RUN", "FAILED", "REJECTED", "EXPIRED",
+];
+
+export interface Proposal {
+  id: string;
+  action_type: string;
+  target: string;
+  payload: unknown;
+  reason: string;
+  requested_by: string;
+  status: ProposalStatus;
+  created_at: string;
+  expires_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_note: string | null;
+  executed_at: string | null;
+  result: unknown;
+}
+
+export interface KillSwitch {
+  engaged: boolean;
+  set_by: string | null;
+  set_at: string | null;
+  reason: string | null;
+}
+
+export interface AuditEvent {
+  seq: number;
+  ts: string;
+  actor: string;
+  event: string;
+  proposal_id: string | null;
+  detail: unknown;
+  hash: string;
+}
+
+export interface Breaker {
+  stream: string;
+  state: "CLOSED" | "OPEN";
+  incident_id: string | null;
+  pending_decision: string | null;
+}
+
+export interface Incident {
+  id: string;
+  stream: string;
+  opened_at: string;
+  trigger: string;
+  summary: string;
+  findings: unknown;
+  positions: unknown;
+  dump_path: string | null;
+  dump_sha256: string | null;
+  actions: Record<string, unknown>;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  resolution: unknown;
+}
+
+export interface Finding {
+  id: string;
+  cloud: string;
+  scope: string;
+  region: string | null;
+  category: string;
+  resource_type: string;
+  resource_id: string;
+  name: string | null;
+  missing: string[];
+  wrong_case: unknown;
+  invalid: unknown;
+  owner_hint: string | null;
+  status: "OPEN" | "RESOLVED";
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+  resolution: string | null;
+}
+
+export interface Scan {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  resources_scanned: number;
+  noncompliant: number;
+  new_findings: number;
+  resolved_findings: number;
+  source_errors: unknown;
+  alert: unknown;
+}
+
+export interface Candidate {
+  id: string;
+  cloud: string;
+  kind: string;
+  resource_id: string;
+  size: string | null;
+  first_seen_idle_at: string;
+  last_seen_idle_at: string;
+  proposal_id: string | null;
+}
+
+export interface JitRole {
+  role: string;
+  description: string;
+  idp: string;
+  group_ref: string;
+  max_minutes: number;
+  target_cloud_accounts: string[];
+}
+
+export interface JitRequest {
+  id: string;
+  user_id: string;
+  requested_role: string;
+  target_cloud_account: string;
+  expiration_minutes: number;
+  approval_status: "PENDING" | "APPROVED" | "REJECTED" | "EXPIRED";
+  access_status: "NONE" | "ACTIVE" | "REVOKED" | "DRY_RUN" | "GRANT_FAILED";
+  idp: string;
+  group_ref: string;
+  justification: string;
+  requested_by: string;
+  proposal_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+  decided_by: string | null;
+  granted_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  revoke_attempts: number;
+  last_error: string | null;
+}
+
+export interface Prediction {
+  id: string;
+  risk_id: string;
+  service: string;
+  severity: string;
+  probability: number;
+  predicted_at: string;
+  notify_at: string;
+  summary: string;
+  status: string;
+  attempts: number;
+  channels: string[];
+  escalated_at: string | null;
+  last_error: string | null;
+}
