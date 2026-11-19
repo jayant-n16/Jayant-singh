@@ -1,0 +1,120 @@
+# OPLIA drift remediation for GitLab CI.
+#
+# Install in the INFRASTRUCTURE project as .gitlab-ci.yml (or include it). Runs only when
+# the OPLIA control plane fires the pipeline trigger after an approved proposal.
+#
+# Safety: `plan` runs unattended; `apply` is a manual job (protect the
+# `oplia-production-remediation` environment so only approvers can run it), applies only
+# the reviewed plan artifact, and is serialised per zone with a resource_group.
+#
+# Credentials use GitLab OIDC id_tokens (no static cloud keys):
+#   AWS:   CI variable OPLIA_AWS_ROLE_NAME (role in each target account trusting GitLab OIDC),
+#          OPLIA_AWS_REGION, OPLIA_TF_STATE_BUCKET, OPLIA_TF_LOCK_TABLE
+#   Azure: CI variables ARM_CLIENT_ID, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID (federated credential),
+#          OPLIA_AZURE_STATE_RG, OPLIA_AZURE_STATE_ACCOUNT, OPLIA_AZURE_STATE_CONTAINER
+#   Layout: OPLIA_TF_ROOT/<blueprint>/<zone_name>/ with an empty `backend "s3" {}` / `backend "azurerm" {}`.
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+    - when: never
+
+variables:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  OPLIA_TF_LOCK_TABLE: terraform-state-lock
+
+default:
+  image:
+    name: hashicorp/terraform:1.9.8   # official image, Alpine-based
+    entrypoint: [""]
+  interruptible: false
+
+stages: [validate, plan, apply]
+
+.oidc: &oidc
+  id_tokens:
+    AWS_OIDC_TOKEN:
+      aud: sts.amazonaws.com
+    AZURE_OIDC_TOKEN:
+      aud: api://AzureADTokenExchange
+
+.setup: &setup |
+  set -eu
+  case "$ZONE_NAME" in *[!A-Za-z0-9_.-]*|"") echo "invalid ZONE_NAME"; exit 1;; esac
+  case "$ACCOUNT_ID" in *[!A-Za-z0-9_-]*|"") echo "invalid ACCOUNT_ID"; exit 1;; esac
+  case "$CLOUD" in aws|azure) ;; *) echo "CLOUD must be aws or azure"; exit 1;; esac
+  case "$BLUEPRINT" in control-tower-standard|alz-hybrid) ;; *) echo "blueprint not allowed"; exit 1;; esac
+  case "$OPLIA_TF_ROOT" in *..*|"") echo "OPLIA_TF_ROOT not set or invalid"; exit 1;; esac
+  TF_ROOT="$OPLIA_TF_ROOT/$BLUEPRINT/$ZONE_NAME"
+  [ -d "$TF_ROOT" ] || { echo "Terraform root $TF_ROOT not found"; exit 1; }
+  KEY="$BLUEPRINT/$ZONE_NAME/$ACCOUNT_ID.tfstate"
+  if [ "$CLOUD" = "aws" ]; then
+    case "$ACCOUNT_ID" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;; *) echo "AWS account must be 12 digits"; exit 1;; esac
+    umask 077
+    printf '%s' "$AWS_OIDC_TOKEN" > "$CI_PROJECT_DIR/.aws_oidc_token"
+    export AWS_WEB_IDENTITY_TOKEN_FILE="$CI_PROJECT_DIR/.aws_oidc_token"
+    export AWS_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${OPLIA_AWS_ROLE_NAME}"
+    export AWS_ROLE_SESSION_NAME="oplia-remediate-${CI_PIPELINE_ID}"
+    export AWS_REGION="$OPLIA_AWS_REGION"
+    terraform -chdir="$TF_ROOT" init -input=false \
+      -backend-config="bucket=$OPLIA_TF_STATE_BUCKET" -backend-config="key=$KEY" \
+      -backend-config="region=$OPLIA_AWS_REGION" -backend-config="dynamodb_table=$OPLIA_TF_LOCK_TABLE" \
+      -backend-config="encrypt=true"
+  else
+    export ARM_USE_OIDC=true ARM_OIDC_TOKEN="$AZURE_OIDC_TOKEN"
+    terraform -chdir="$TF_ROOT" init -input=false \
+      -backend-config="resource_group_name=$OPLIA_AZURE_STATE_RG" \
+      -backend-config="storage_account_name=$OPLIA_AZURE_STATE_ACCOUNT" \
+      -backend-config="container_name=$OPLIA_AZURE_STATE_CONTAINER" -backend-config="key=$KEY" \
+      -backend-config="use_oidc=true" -backend-config="use_azuread_auth=true"
+  fi
+
+validate:
+  stage: validate
+  script:
+    - |
+      set -eu
+      case "$ZONE_NAME" in *[!A-Za-z0-9_.-]*|"") echo "invalid ZONE_NAME"; exit 1;; esac
+      case "$CORRELATION_ID" in *[!A-Za-z0-9_.:-]*|"") echo "invalid CORRELATION_ID"; exit 1;; esac
+      echo "Remediation $CORRELATION_ID: $CLOUD/$ACCOUNT_ID zone=$ZONE_NAME blueprint=$BLUEPRINT"
+
+plan:
+  stage: plan
+  <<: *oidc
+  needs: [validate]
+  resource_group: oplia-remediate-$ZONE_NAME
+  script:
+    - *setup
+    - |
+      set +e
+      terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode -out="$CI_PROJECT_DIR/tfplan"
+      rc=$?
+      set -e
+      case $rc in
+        0) echo "No drift to remediate."; touch "$CI_PROJECT_DIR/no_changes" ;;
+        2) terraform -chdir="$TF_ROOT" show -no-color "$CI_PROJECT_DIR/tfplan" | tail -n 400 ;;
+        *) echo "terraform plan failed ($rc)"; exit "$rc" ;;
+      esac
+    - rm -f "$CI_PROJECT_DIR/.aws_oidc_token"
+  artifacts:
+    paths: [tfplan, no_changes]
+    expire_in: 1 day
+    when: on_success
+
+apply:
+  stage: apply
+  <<: *oidc
+  needs: [plan]
+  resource_group: oplia-remediate-$ZONE_NAME
+  environment:
+    name: oplia-production-remediation
+  rules:
+    - when: manual
+      allow_failure: false
+  script:
+    - |
+      if [ -f "$CI_PROJECT_DIR/no_changes" ]; then echo "No changes were planned; nothing to apply."; exit 0; fi
+    - *setup
+    - terraform -chdir="$TF_ROOT" apply -input=false -lock-timeout=5m "$CI_PROJECT_DIR/tfplan"
+    - rm -f "$CI_PROJECT_DIR/.aws_oidc_token"

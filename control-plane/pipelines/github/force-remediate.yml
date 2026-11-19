@@ -1,0 +1,241 @@
+# OPLIA drift remediation for GitHub Actions.
+#
+# Install in the INFRASTRUCTURE repository (Control Tower Standard / ALZ Hybrid) as
+# .github/workflows/force-remediate.yml. Triggered only by the OPLIA control plane via
+# repository_dispatch, after an approver has approved the remediation proposal.
+#
+# Safety: `plan` runs unattended; `apply` runs ONLY the reviewed plan file and waits on the
+# protected environment `oplia-production-remediation` (configure required reviewers in
+# Settings -> Environments). Applying a saved plan never prompts, which is the safe
+# equivalent of `-auto-approve`: it cannot apply anything other than what was reviewed,
+# and Terraform refuses a stale plan if state changed in between.
+#
+# Required repository variables (Settings -> Variables):
+#   OPLIA_TF_ROOT            directory holding <blueprint>/<zone_name>/ roots (e.g. "blueprints")
+#   OPLIA_AWS_ROLE_NAME      IAM role (in each target account) trusted for GitHub OIDC
+#   OPLIA_AWS_REGION         region for the provider and the S3 backend
+#   OPLIA_TF_STATE_BUCKET    S3 bucket from the backends module (Phase 2)
+#   OPLIA_TF_LOCK_TABLE      DynamoDB lock table (default name: terraform-state-lock)
+#   OPLIA_AZURE_CLIENT_ID / OPLIA_AZURE_TENANT_ID / OPLIA_AZURE_SUBSCRIPTION_ID
+#   OPLIA_AZURE_STATE_RG / OPLIA_AZURE_STATE_ACCOUNT / OPLIA_AZURE_STATE_CONTAINER
+# Each Terraform root must declare an empty backend block: `backend "s3" {}` or `backend "azurerm" {}`.
+
+name: OPLIA force remediate
+run-name: "OPLIA remediation ${{ github.event.client_payload.correlation_id }}"
+
+on:
+  repository_dispatch:
+    types: [oplia-drift-remediation]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: oplia-remediate-${{ github.event.client_payload.zone_name }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  # Untrusted input is passed through environment variables only, never interpolated into scripts.
+  ZONE_NAME: ${{ github.event.client_payload.zone_name }}
+  CLOUD: ${{ github.event.client_payload.cloud }}
+  ACCOUNT_ID: ${{ github.event.client_payload.account_id }}
+  BLUEPRINT: ${{ github.event.client_payload.blueprint }}
+  CORRELATION_ID: ${{ github.event.client_payload.correlation_id }}
+  TF_ROOT_BASE: ${{ vars.OPLIA_TF_ROOT }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+      cloud: ${{ steps.validate.outputs.cloud }}
+    steps:
+      - name: Validate payload
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ZONE_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] || { echo "::error::invalid zone_name"; exit 1; }
+          [[ "$CLOUD" =~ ^(aws|azure)$ ]] || { echo "::error::cloud must be aws or azure"; exit 1; }
+          [[ "$ACCOUNT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || { echo "::error::invalid account_id"; exit 1; }
+          [[ "$BLUEPRINT" =~ ^(control-tower-standard|alz-hybrid)$ ]] || { echo "::error::blueprint not allowed"; exit 1; }
+          [[ "$CORRELATION_ID" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || { echo "::error::invalid correlation_id"; exit 1; }
+          [[ "$TF_ROOT_BASE" =~ ^[A-Za-z0-9_./-]+$ && "$TF_ROOT_BASE" != *..* ]] || { echo "::error::OPLIA_TF_ROOT not set or invalid"; exit 1; }
+          if [[ "$CLOUD" == "aws" && ! "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then echo "::error::AWS account_id must be 12 digits"; exit 1; fi
+          echo "cloud=$CLOUD" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve Terraform root
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$TF_ROOT_BASE/$BLUEPRINT/$ZONE_NAME"
+          [[ -d "$root" ]] || { echo "::error::Terraform root $root not found"; exit 1; }
+          echo "TF_ROOT=$root" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: AWS credentials (OIDC)
+        if: env.CLOUD == 'aws'
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.ACCOUNT_ID }}:role/${{ vars.OPLIA_AWS_ROLE_NAME }}
+          role-session-name: oplia-remediate-${{ github.run_id }}
+          aws-region: ${{ vars.OPLIA_AWS_REGION }}
+
+      - name: Azure login (OIDC)
+        if: env.CLOUD == 'azure'
+        uses: azure/login@a65d910e8af852a8061c627c456678983e180302 # v2.2.0
+        with:
+          client-id: ${{ vars.OPLIA_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.OPLIA_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.OPLIA_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform init (locked remote state)
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ vars.OPLIA_TF_STATE_BUCKET }}
+          LOCK_TABLE: ${{ vars.OPLIA_TF_LOCK_TABLE || 'terraform-state-lock' }}
+          AWS_STATE_REGION: ${{ vars.OPLIA_AWS_REGION }}
+          AZ_STATE_RG: ${{ vars.OPLIA_AZURE_STATE_RG }}
+          AZ_STATE_ACCOUNT: ${{ vars.OPLIA_AZURE_STATE_ACCOUNT }}
+          AZ_STATE_CONTAINER: ${{ vars.OPLIA_AZURE_STATE_CONTAINER }}
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.OPLIA_AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.OPLIA_AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.OPLIA_AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          key="$BLUEPRINT/$ZONE_NAME/$ACCOUNT_ID.tfstate"
+          if [[ "$CLOUD" == "aws" ]]; then
+            terraform -chdir="$TF_ROOT" init -input=false \
+              -backend-config="bucket=$STATE_BUCKET" -backend-config="key=$key" \
+              -backend-config="region=$AWS_STATE_REGION" -backend-config="dynamodb_table=$LOCK_TABLE" \
+              -backend-config="encrypt=true"
+          else
+            terraform -chdir="$TF_ROOT" init -input=false \
+              -backend-config="resource_group_name=$AZ_STATE_RG" -backend-config="storage_account_name=$AZ_STATE_ACCOUNT" \
+              -backend-config="container_name=$AZ_STATE_CONTAINER" -backend-config="key=$key" \
+              -backend-config="use_oidc=true" -backend-config="use_azuread_auth=true"
+          fi
+
+      - name: Terraform plan
+        id: plan
+        shell: bash
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.OPLIA_AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.OPLIA_AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.OPLIA_AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -uo pipefail
+          terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode -out=tfplan
+          rc=$?
+          case $rc in
+            0) echo "changes=false" >> "$GITHUB_OUTPUT"; echo "No drift to remediate." >> "$GITHUB_STEP_SUMMARY" ;;
+            2) echo "changes=true" >> "$GITHUB_OUTPUT"
+               { echo "### Remediation plan ($CORRELATION_ID)"; echo '```'; terraform -chdir="$TF_ROOT" show -no-color tfplan | tail -n 400; echo '```'; } >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "::error::terraform plan failed ($rc)"; exit "$rc" ;;
+          esac
+
+      - name: Upload plan
+        if: steps.plan.outputs.changes == 'true'
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: ${{ env.TF_ROOT }}/tfplan
+          retention-days: 1
+          if-no-files-found: error
+
+  apply:
+    needs: plan
+    if: needs.plan.outputs.changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: oplia-production-remediation
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve Terraform root
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$TF_ROOT_BASE/$BLUEPRINT/$ZONE_NAME"
+          [[ -d "$root" ]] || { echo "::error::Terraform root $root not found"; exit 1; }
+          echo "TF_ROOT=$root" >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+
+      - name: AWS credentials (OIDC)
+        if: needs.plan.outputs.cloud == 'aws'
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::${{ env.ACCOUNT_ID }}:role/${{ vars.OPLIA_AWS_ROLE_NAME }}
+          role-session-name: oplia-remediate-${{ github.run_id }}
+          aws-region: ${{ vars.OPLIA_AWS_REGION }}
+
+      - name: Azure login (OIDC)
+        if: needs.plan.outputs.cloud == 'azure'
+        uses: azure/login@a65d910e8af852a8061c627c456678983e180302 # v2.2.0
+        with:
+          client-id: ${{ vars.OPLIA_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.OPLIA_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.OPLIA_AZURE_SUBSCRIPTION_ID }}
+
+      - name: Download reviewed plan
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: ${{ env.TF_ROOT }}
+
+      - name: Terraform init (locked remote state)
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ vars.OPLIA_TF_STATE_BUCKET }}
+          LOCK_TABLE: ${{ vars.OPLIA_TF_LOCK_TABLE || 'terraform-state-lock' }}
+          AWS_STATE_REGION: ${{ vars.OPLIA_AWS_REGION }}
+          AZ_STATE_RG: ${{ vars.OPLIA_AZURE_STATE_RG }}
+          AZ_STATE_ACCOUNT: ${{ vars.OPLIA_AZURE_STATE_ACCOUNT }}
+          AZ_STATE_CONTAINER: ${{ vars.OPLIA_AZURE_STATE_CONTAINER }}
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.OPLIA_AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.OPLIA_AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.OPLIA_AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          key="$BLUEPRINT/$ZONE_NAME/$ACCOUNT_ID.tfstate"
+          if [[ "$CLOUD" == "aws" ]]; then
+            terraform -chdir="$TF_ROOT" init -input=false \
+              -backend-config="bucket=$STATE_BUCKET" -backend-config="key=$key" \
+              -backend-config="region=$AWS_STATE_REGION" -backend-config="dynamodb_table=$LOCK_TABLE" \
+              -backend-config="encrypt=true"
+          else
+            terraform -chdir="$TF_ROOT" init -input=false \
+              -backend-config="resource_group_name=$AZ_STATE_RG" -backend-config="storage_account_name=$AZ_STATE_ACCOUNT" \
+              -backend-config="container_name=$AZ_STATE_CONTAINER" -backend-config="key=$key" \
+              -backend-config="use_oidc=true" -backend-config="use_azuread_auth=true"
+          fi
+
+      - name: Terraform apply (reviewed plan only)
+        shell: bash
+        env:
+          ARM_USE_OIDC: "true"
+          ARM_CLIENT_ID: ${{ vars.OPLIA_AZURE_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ vars.OPLIA_AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ vars.OPLIA_AZURE_SUBSCRIPTION_ID }}
+        run: terraform -chdir="$TF_ROOT" apply -input=false -lock-timeout=5m tfplan
