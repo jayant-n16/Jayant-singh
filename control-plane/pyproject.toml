@@ -50,6 +50,7 @@ oplia-jit-worker = "oplia_ctl.identity.config:worker_main"
 oplia-identity-sweep = "oplia_ctl.identity.config:sweep_main"
 oplia-dr-breaker = "oplia_ctl.dr.config:main"
 oplia-iac-lifecycle = "oplia_ctl.lifecycle.manager:main"
+oplia-dev-idp = "oplia_ctl.devidp:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

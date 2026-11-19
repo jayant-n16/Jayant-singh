@@ -23,6 +23,23 @@ identities or data passes through one safety gate.
 `OPLIA_ENVIRONMENT=prod` refuses to start with SQLite, without OIDC, or in autonomous mode
 (no approval + no dry-run) unless `OPLIA_ALLOW_AUTONOMOUS_IN_PROD=true` is set explicitly.
 
+## Try it locally with a login (development only)
+
+`oplia-dev-idp` is a local OIDC login (authorization code + PKCE) so the API - and the admin
+console - can be used on a laptop without an Entra ID / Okta tenant. It starts only with
+`OPLIA_ENVIRONMENT=dev`, listens on 127.0.0.1, signs with a key generated in memory, and a
+production API refuses any `http://` issuer. Test users: `alice` (approver), `bob` (operator),
+`carol` (both), `dave` (no role).
+
+```bash
+export OPLIA_ENVIRONMENT=dev
+oplia-dev-idp                                   # terminal 1, http://127.0.0.1:8090
+export OPLIA_DATABASE_URL=sqlite:///./oplia-dev.db
+export OPLIA_OIDC_ISSUER=http://127.0.0.1:8090/ OPLIA_OIDC_AUDIENCE=oplia-api
+export OPLIA_OIDC_JWKS_URL=http://127.0.0.1:8090/jwks OPLIA_SECRET_WEBHOOK_HMAC_SECRET=local-test-secret
+uvicorn oplia_ctl.main:app --port 8080         # terminal 2
+```
+
 ## Phase 1 components
 
 * **Drift auto-remediation** – `POST /webhooks/drift` (HMAC-signed, replay-protected,
@@ -273,7 +290,10 @@ identities or data passes through one safety gate.
 | GET | `/proposals`, `/proposals/{id}` | OIDC: operator or approver |
 | POST | `/proposals/{id}/approve`, `/reject` | OIDC: approver |
 | POST | `/proposals/{id}/execute` | OIDC: operator |
+| GET | `/me` | OIDC: any signed-in user (subject, roles, what the console may offer) |
+| GET | `/kill-switch` | OIDC: operator or approver |
 | POST | `/kill-switch` | OIDC: approver |
+| GET | `/audit/events` | OIDC: approver (newest first; `before_seq`, `limit`, `proposal_id`) |
 | GET | `/audit/verify` | OIDC: approver |
 | POST | `/webhooks/aiops/alert`, `/webhooks/aiops/prediction` | HMAC |
 | POST | `/webhooks/aiops/alertmanager` | bearer token (`alertmanager_webhook_token`) |

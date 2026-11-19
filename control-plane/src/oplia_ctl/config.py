@@ -103,6 +103,8 @@ class Settings(BaseSettings):
             problems.append("OPLIA_DATABASE_URL must point to PostgreSQL in prod")
         if not (self.oidc_issuer and self.oidc_audience and self.oidc_jwks_url):
             problems.append("OIDC issuer, audience and JWKS URL are required in prod")
+        elif not (self.oidc_issuer.startswith("https://") and self.oidc_jwks_url.startswith("https://")):
+            problems.append("OIDC issuer and JWKS URL must be https:// in prod (the local dev login is refused)")
         if not self.require_approval and not self.dry_run and not self.allow_autonomous_in_prod:
             problems.append(
                 "prod refuses autonomous mode (no approval, no dry-run) unless "

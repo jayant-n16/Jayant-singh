@@ -234,6 +234,29 @@ class SafetyGate:
             flag = s.get(ControlFlagRow, KILL_SWITCH_KEY)
             return flag is not None and flag.value == "on"
 
+    def kill_switch_state(self) -> dict[str, Any]:
+        """Current kill-switch state with who set it, when and why (``set_*`` are None if never set)."""
+        with session_scope(self._sf) as s:
+            flag = s.get(ControlFlagRow, KILL_SWITCH_KEY)
+            if flag is None:
+                return {"engaged": False, "set_by": None, "set_at": None, "reason": None}
+            return {"engaged": flag.value == "on", "set_by": flag.set_by,
+                    "set_at": _req_utc(flag.set_at).isoformat(), "reason": flag.reason}
+
+    def list_audit(self, *, before_seq: int | None = None, limit: int = 100,
+                   proposal_id: str | None = None) -> list[dict[str, Any]]:
+        """Audit events, newest first. Page with ``before_seq`` = the smallest ``seq`` already seen."""
+        limit = max(1, min(limit, 500))
+        q = select(AuditEventRow).order_by(AuditEventRow.seq.desc()).limit(limit)
+        if before_seq is not None:
+            q = q.where(AuditEventRow.seq < before_seq)
+        if proposal_id is not None:
+            q = q.where(AuditEventRow.proposal_id == proposal_id)
+        with session_scope(self._sf) as s:
+            return [{"seq": r.seq, "ts": _req_utc(r.ts).isoformat(), "actor": r.actor, "event": r.event,
+                     "proposal_id": r.proposal_id, "detail": json.loads(r.detail_json), "hash": r.hash}
+                    for r in s.execute(q).scalars()]
+
     def set_kill_switch(self, *, engaged: bool, actor: str, reason: str) -> None:
         with session_scope(self._sf) as s:
             flag = s.get(ControlFlagRow, KILL_SWITCH_KEY)

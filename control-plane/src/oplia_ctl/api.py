@@ -30,7 +30,10 @@ GET  /dr/breakers                     DR circuit breaker state (operator/approve
 GET  /dr/incidents                    DR incidents with findings and actions (operator/approver)
 POST /dr/breakers/{stream}/trip       approver: open the breaker manually (sever + alert + lock)
 POST /dr/breakers/{stream}/reset      approver: close it; release or discard the held bundle; unlock
+GET  /me                              any signed-in user: subject, roles, what the console may offer
+GET  /kill-switch                     operator/approver: current state, who set it and why
 POST /kill-switch                     approver: engage/release
+GET  /audit/events                    approver: audit log, newest first (?before_seq=&limit=&proposal_id=)
 GET  /audit/verify                    approver: verify the audit hash chain
 """
 
@@ -522,6 +525,27 @@ def create_app(
     def kill_switch(body: KillSwitchBody, p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
         gate.set_kill_switch(engaged=body.engaged, actor=p.subject, reason=body.reason)
         return {"engaged": gate.kill_switch_engaged()}
+
+    @app.get("/me")
+    def me(p: Annotated[Principal, Depends(principal)]) -> dict[str, Any]:
+        """Who the caller is and what the console may offer them (the API still enforces every call)."""
+        return {"subject": p.subject, "roles": sorted(p.roles),
+                "can": {"approve": p.has_role(approver_role), "operate": p.has_role(operator_role),
+                        "read": p.has_role(approver_role) or p.has_role(operator_role)},
+                "features": {"aiops": escalation is not None or aiops_engine is not None,
+                             "finops": finops_sf is not None, "jit": jit is not None,
+                             "dr": dr_breaker is not None}}
+
+    @app.get("/kill-switch")
+    def kill_switch_state(_: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        return gate.kill_switch_state()
+
+    @app.get("/audit/events")
+    def audit_events(_: Annotated[Principal, Depends(approver)], before_seq: int | None = None,
+                     limit: int = 100, proposal_id: str | None = None) -> list[dict[str, Any]]:
+        if before_seq is not None and before_seq < 1:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "before_seq must be >= 1")
+        return gate.list_audit(before_seq=before_seq, limit=limit, proposal_id=proposal_id)
 
     @app.get("/audit/verify")
     def audit_verify(_: Annotated[Principal, Depends(approver)]) -> dict[str, bool]:

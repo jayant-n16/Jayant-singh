@@ -148,3 +148,36 @@ def test_runtime_threat_webhook(api):
 def test_health(api):
     assert api.get("/healthz").json() == {"status": "ok"}
     assert api.get("/readyz").json() == {"status": "ready"}
+
+
+def test_me_reports_roles_and_capabilities(api):
+    me = api.get("/me", headers=bearer("carol", "oplia-approver", "oplia-operator")).json()
+    assert me["subject"] == "carol" and me["roles"] == ["oplia-approver", "oplia-operator"]
+    assert me["can"] == {"approve": True, "operate": True, "read": True}
+    assert me["features"] == {"aiops": False, "finops": False, "jit": False, "dr": False}
+    nobody = api.get("/me", headers=bearer("dave")).json()  # signed in, no role: allowed, can nothing
+    assert nobody["can"] == {"approve": False, "operate": False, "read": False}
+    assert api.get("/me").status_code == 401
+
+
+def test_kill_switch_state_and_audit_events(api):
+    assert api.get("/kill-switch", headers=bearer("op", "oplia-operator")).json() == {
+        "engaged": False, "set_by": None, "set_at": None, "reason": None}
+    assert api.get("/kill-switch", headers=bearer("dave")).status_code == 403
+    api.post("/kill-switch", json={"engaged": True, "reason": "incident 7"}, headers=bearer("bob", "oplia-approver"))
+    state = api.get("/kill-switch", headers=bearer("op", "oplia-operator")).json()
+    assert state["engaged"] is True and state["set_by"] == "bob" and state["reason"] == "incident 7"
+    assert state["set_at"].endswith("+00:00")
+    for i in range(3):
+        body, h = signed(DRIFT | {"zone_name": f"zone-{i}"}, delivery=f"d-{i}")
+        api.post("/webhooks/drift", content=body, headers=h)
+    approver = bearer("bob", "oplia-approver")
+    assert api.get("/audit/events", headers=bearer("op", "oplia-operator")).status_code == 403
+    page1 = api.get("/audit/events", params={"limit": 2}, headers=approver).json()
+    assert [e["seq"] for e in page1] == [4, 3] and page1[0]["event"] == "proposed"
+    page2 = api.get("/audit/events", params={"limit": 10, "before_seq": page1[-1]["seq"]}, headers=approver).json()
+    assert [e["seq"] for e in page2] == [2, 1] and page2[-1]["event"] == "kill_switch_on"
+    pid = page1[0]["proposal_id"]
+    only = api.get("/audit/events", params={"proposal_id": pid}, headers=approver).json()
+    assert {e["proposal_id"] for e in only} == {pid}
+    assert api.get("/audit/events", params={"before_seq": 0}, headers=approver).status_code == 400
