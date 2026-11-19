@@ -10,18 +10,23 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class CICDTarget(BaseSettings):
+class CICDTarget(BaseModel):
     """Where a remediation is dispatched for one CI/CD system.
 
     Targets are fixed in configuration so that an incoming webhook can never
     point the control plane at an arbitrary repository or URL.
+
+    This is deliberately a plain model, not a settings class: it is populated
+    only through ``OPLIA_CICD__*`` variables on :class:`Settings`, so ambient
+    variables such as ``GITHUB_REPOSITORY`` or ``JENKINS_URL`` (set by every
+    GitHub runner and Jenkins agent) can never redirect remediation.
     """
 
-    model_config = SettingsConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid")
 
     # GitHub
     github_api_url: str = "https://api.github.com"

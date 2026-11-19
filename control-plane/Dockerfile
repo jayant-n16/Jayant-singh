@@ -2,17 +2,17 @@
 # Pin the base image by digest in your build pipeline (e.g. Tekton) for reproducible builds.
 FROM registry.access.redhat.com/ubi9/python-312 AS build
 WORKDIR /opt/app-root/src
-COPY pyproject.toml README.md ./
-COPY src ./src
+COPY --chown=1001:0 pyproject.toml README.md ./
+COPY --chown=1001:0 src ./src
 RUN pip install --no-cache-dir --upgrade pip \
  && pip wheel --no-cache-dir --wheel-dir /tmp/wheels ".[postgres]"
 
 FROM registry.access.redhat.com/ubi9/python-312
 WORKDIR /opt/app-root/src
-COPY --from=build /tmp/wheels /tmp/wheels
+COPY --from=build --chown=1001:0 /tmp/wheels /tmp/wheels
 RUN pip install --no-cache-dir --no-index /tmp/wheels/*.whl && rm -rf /tmp/wheels
-COPY alembic.ini ./
-COPY migrations ./migrations
+COPY --chown=1001:0 alembic.ini ./
+COPY --chown=1001:0 migrations ./migrations
 # UBI images run as UID 1001 and support OpenShift's arbitrary UIDs (group 0).
 USER 1001
 ENV PYTHONUNBUFFERED=1 \

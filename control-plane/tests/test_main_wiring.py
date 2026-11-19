@@ -37,3 +37,17 @@ def test_prod_refuses_unsafe_settings(over, msg):
 def test_prod_autonomous_requires_explicit_opt_in():
     Settings(environment="prod", database_url="postgresql+psycopg://u@h/db", dry_run=False,
              require_approval=False, allow_autonomous_in_prod=True, **OIDC).assert_production_safe()
+
+
+def test_ambient_ci_variables_cannot_redirect_remediation(monkeypatch):
+    # Regression: GitHub runners set GITHUB_REPOSITORY and Jenkins agents set JENKINS_URL.
+    # These must never populate the remediation target; only OPLIA_CICD__* may.
+    monkeypatch.setenv("GITHUB_REPOSITORY", "attacker/repo")
+    monkeypatch.setenv("JENKINS_URL", "https://evil.example.com")
+    monkeypatch.setenv("GITLAB_PROJECT_ID", "999")
+    s = Settings()
+    assert s.cicd.github_repository == ""
+    assert s.cicd.jenkins_url == ""
+    assert s.cicd.gitlab_project_id == ""
+    monkeypatch.setenv("OPLIA_CICD__GITHUB_REPOSITORY", "acme/infra")
+    assert Settings().cicd.github_repository == "acme/infra"
