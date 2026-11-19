@@ -1,0 +1,65 @@
+# One breaker per replication stream. Exactly one replica (Recreate): the rolling rate baseline is
+# kept in memory, and two consumers would split the stream between two baselines.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oplia-dr-breaker-orders
+  labels:
+    app.kubernetes.io/name: oplia-dr-breaker
+    oplia.io/stream: orders-pg
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oplia-dr-breaker
+      oplia.io/stream: orders-pg
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oplia-dr-breaker
+        oplia.io/stream: orders-pg
+    spec:
+      serviceAccountName: oplia-dr-breaker
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: breaker
+          image: oplia-control-plane:REPLACE_WITH_RELEASE   # the control-plane image, pinned by digest
+          command: ["oplia-dr-breaker"]
+          envFrom:
+            - configMapRef:
+                name: oplia-dr-orders          # OPLIA_DR_* settings (see examples/dr/dr.env.example)
+            - secretRef:
+                name: oplia-control-plane-env  # OPLIA_DATABASE_URL etc. (or Vault agent, Phase 7)
+          env:
+            - name: OPLIA_DR_QUARANTINE_DIR
+              value: /var/lib/oplia/dr-quarantine
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: quarantine
+              mountPath: /var/lib/oplia/dr-quarantine
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: quarantine
+          persistentVolumeClaim:
+            claimName: oplia-dr-quarantine
+        - name: tmp
+          emptyDir: {}

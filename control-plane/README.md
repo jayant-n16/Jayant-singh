@@ -198,6 +198,37 @@ identities or data passes through one safety gate.
 * Settings: `examples/identity/identity.env.example`. Secrets: `entra_client_secret`,
   `okta_api_token`, `ad_bind_password`.
 
+## Phase 6 components – cross-cloud DR and replication circuit breaker
+
+* **DR plane** (`deploy/dr/`, design in `deploy/dr/README.md`): CockroachDB spanning AWS, Azure,
+  GCP and IBM Cloud (3 nodes per cloud, `SURVIVE REGION FAILURE`), plus an **asynchronous DR
+  channel** (CockroachDB changefeed and Debezium for PostgreSQL/MySQL/MongoDB -> Kafka).
+  Within one CockroachDB cluster a committed `DROP TABLE` is on every cloud at once - nothing can be
+  intercepted there; the breaker protects the asynchronous DR copies.
+* **`oplia-dr-breaker`** (one process per stream): CDC topic -> inspect -> DR topic. DR consumers read
+  only the DR topic. Decoders for SQL text (sqlglot: keywords inside string literals are not
+  commands), Debezium envelopes, MongoDB change events and BSON commands, CockroachDB changefeed
+  messages; undecodable records are treated as suspicious.
+* **Signatures**: DROP TABLE/DATABASE/SCHEMA, TRUNCATE, UPDATE/DELETE without WHERE, Mongo
+  `deleteMany`/`updateMany` with an empty filter, `drop`, `dropDatabase`; **rate**: row mutations in
+  the last minute > 6x the average of the previous 5 minutes (+500 %), with a volume floor
+  (default 1000) and 5-minute warm-up.
+* **On a trip**: **A** the bundle is withheld, the destination connection closed and consumption
+  stopped - the source position is not committed, so nothing is lost; **B** the complete bundle is
+  written to a 0600 quarantine file and POSTed to incident webhooks (HMAC-signed), PagerDuty/Slack get
+  a critical summary with the dump's SHA-256; **C** every DR target is switched to read-only and
+  verified - PostgreSQL (`ALTER SUBSCRIPTION ... DISABLE`, database `default_transaction_read_only`,
+  other sessions terminated), MySQL (`STOP REPLICA`, `SET PERSIST super_read_only`), MongoDB
+  (`fsync` lock), CockroachDB (`ALTER ROLE ALL IN DATABASE ... SET default_transaction_read_only`).
+  C honours dry-run. Every step is in the audit chain.
+* **Reset** (`POST /dr/breakers/{stream}/reset`, approver): `release` forwards the held bundle,
+  `discard` skips it; optional unlock of exactly what was locked. A relay restarted while OPEN
+  re-reads the held records and applies the decision by source position.
+* Kafka: consumer without auto-commit and `read_committed`; producer idempotent with `acks=all`;
+  the source is committed only after the destination acknowledged.
+* Settings: `examples/dr/dr.env.example`. MySQL lock account needs `SYSTEM_VARIABLES_ADMIN`,
+  `REPLICATION_SLAVE_ADMIN`, `REPLICATION CLIENT`.
+
 ## API
 
 | Method | Path | Auth |
@@ -216,6 +247,8 @@ identities or data passes through one safety gate.
 | GET/POST | `/jit/roles`, `/jit/requests` | OIDC: operator or approver |
 | POST | `/jit/requests/{id}/approve`, `/reject`, `/grant` | OIDC: approver (not the requester) |
 | POST | `/jit/requests/{id}/revoke` | OIDC: approver or the requester |
+| GET | `/dr/breakers`, `/dr/incidents` | OIDC: operator or approver |
+| POST | `/dr/breakers/{stream}/trip`, `/reset` | OIDC: approver |
 | POST | `/aiops/predictions/{id}/cancel` | OIDC: operator or approver |
 
 ## Configuration
@@ -236,7 +269,7 @@ secrets: webhook_hmac_secret, github_dispatch_token, gitlab_trigger_token,
 ## Run and test
 
 ```bash
-pip install -e ".[dev,postgres,gcp,ad]"   # ad needs libldap/libsasl2 headers
+pip install -e ".[dev,postgres,gcp,ad,dr]"   # ad needs libldap/libsasl2 headers
 ruff check src tests migrations && mypy && bandit -r src -q
 pytest                                                     # SQLite
 OPLIA_TEST_DATABASE_URL=postgresql+psycopg://... pytest    # PostgreSQL, schema built by migrations
@@ -249,6 +282,7 @@ oplia-finops-scan [--audit]                                # tag compliance (Cro
 oplia-finops-optimize observe|window                       # idle clean-up (CronJobs)
 oplia-jit-worker [--once]                                  # JIT revocation every 60 s
 oplia-identity-sweep                                       # 90-day inactive accounts (CronJob)
+oplia-dr-breaker                                           # DR circuit breaker (one per stream)
 ```
 
 ## What is and is not verified
@@ -277,6 +311,12 @@ against Active Directory itself - the AD-only parts (transitive membership rule,
 `userAccountControl`, `lastLogonTimestamp`) are tested with a fake connection. Entra ID and Okta
 were tested with HTTP mocks of the documented endpoints. Entra `signInActivity` needs an Entra ID
 P1/P2 licence and `AuditLog.Read.All`.
+
+**Phase 6 not yet verified live**: the read-only locks ran against **real PostgreSQL 16 and
+MySQL 8.0** (lock, verify, writes refused, unlock); MongoDB and CockroachDB lockers are tested with
+fakes. Kafka was not run - the Kafka adapter is tested with fakes of the confluent-kafka API. The
+CockroachDB manifests pass `kustomize` + `kubeconform -strict` but were not applied to a cluster,
+and the SQL was not executed against CockroachDB.
 
 **Not yet verified against live systems**: real GitHub/GitLab/Jenkins instances, a real SIEM,
 real AWS/Azure accounts, a real Kubernetes/OpenShift cluster, and the pipeline templates

@@ -116,3 +116,25 @@ def test_build_identity_catalog_with_missing_provider_fails(tmp_path, monkeypatc
     monkeypatch.setenv("OPLIA_IDENTITY_CATALOG_PATH", str(example))
     with pytest.raises(ValueError, match="not configured"):
         build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'j.db'}", **OIDC))
+
+
+def test_build_with_dr_breaker(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("OPLIA_DR_STREAM", "orders-pg")
+    monkeypatch.setenv("OPLIA_DR_TARGETS", json.dumps([
+        {"name": "dr-azure-pg", "engine": "postgres", "cloud": "azure", "dsn_secret": "d1", "database": "orders"},
+        {"name": "dr-gcp-mysql", "engine": "mysql", "cloud": "gcp", "dsn_secret": "d2"}]))
+    monkeypatch.setenv("OPLIA_DR_QUARANTINE_DIR", str(tmp_path / "q"))
+    app = build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'dr.db'}", **OIDC))
+    assert TestClient(app).get("/dr/breakers").status_code == 401  # route exists, protected
+
+
+def test_dr_target_names_must_be_unique(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("OPLIA_DR_STREAM", "orders-pg")
+    t = {"name": "dr-1", "engine": "mysql", "cloud": "gcp", "dsn_secret": "d"}
+    monkeypatch.setenv("OPLIA_DR_TARGETS", json.dumps([t, t]))
+    with pytest.raises(ValueError, match="unique"):
+        build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'd2.db'}", **OIDC))

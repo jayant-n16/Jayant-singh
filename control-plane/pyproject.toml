@@ -29,6 +29,7 @@ dependencies = [
 postgres = ["psycopg[binary]>=3.1"]
 gcp = ["google-cloud-asset>=3.26", "google-cloud-compute>=1.19"]
 ad = ["python-ldap>=3.4"]
+dr = ["sqlglot>=25", "pymongo>=4.6", "confluent-kafka>=2.4", "PyMySQL>=1.1"]
 dev = [
   "pytest>=8.0",
   "respx>=0.21",
@@ -47,6 +48,7 @@ oplia-finops-scan = "oplia_ctl.finops.config:scan_main"
 oplia-finops-optimize = "oplia_ctl.finops.config:optimize_main"
 oplia-jit-worker = "oplia_ctl.identity.config:worker_main"
 oplia-identity-sweep = "oplia_ctl.identity.config:sweep_main"
+oplia-dr-breaker = "oplia_ctl.dr.config:main"
 oplia-iac-lifecycle = "oplia_ctl.lifecycle.manager:main"
 
 [tool.setuptools.packages.find]
@@ -73,6 +75,7 @@ ignore = ["S101"]  # assert is used in tests only
 "src/oplia_ctl/aiops/config.py" = ["S105"]
 "src/oplia_ctl/finops/config.py" = ["S105"]
 "src/oplia_ctl/identity/config.py" = ["S105"]
+"src/oplia_ctl/dr/*.py" = ["S105", "S608"]
 "src/oplia_ctl/identity/providers/*.py" = ["S105", "S107"]
 
 [tool.mypy]

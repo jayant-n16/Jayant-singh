@@ -45,10 +45,15 @@ jobs:
           sudo systemctl stop slapd || true
           # the packaged AppArmor profile only allows slapd's default paths; the test server runs from RUNNER_TEMP
           if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true; fi
+          # MySQL 8 for the DR read-only-lock integration test (runner image ships mysqld; profile limits datadir)
+          sudo systemctl stop mysql || true
+          if [ -f /etc/apparmor.d/usr.sbin.mysqld ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mysqld || true; fi
       - name: Install
-        run: python -m pip install --upgrade pip && pip install -e ".[dev,postgres,gcp,ad]"
+        run: python -m pip install --upgrade pip && pip install -e ".[dev,postgres,gcp,ad,dr]"
       - name: Start test LDAP server
         run: scripts/test-slapd.sh "$RUNNER_TEMP/slapd" | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: Start test MySQL server
+        run: scripts/test-mysql.sh "$RUNNER_TEMP/mysql" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: Lint
         run: ruff check src tests migrations
       - name: Type check
@@ -77,8 +82,8 @@ jobs:
         run: docker build -t oplia-control-plane:ci control-plane
       - name: Smoke test image
         run: |
-          docker run --rm --user 1001 oplia-control-plane:ci python -c "import oplia_ctl.main, oplia_ctl.soar.exporter, oplia_ctl.finops.config, google.cloud.asset_v1, google.cloud.compute_v1, azure.mgmt.compute, oplia_ctl.identity.config, oplia_ctl.identity.providers.ad, ldap; print('import ok, python-ldap', ldap.__version__, 'OpenLDAP', ldap.VENDOR_VERSION)"
-          for cmd in oplia-finops-scan oplia-finops-optimize oplia-aiops-escalator oplia-jit-worker oplia-identity-sweep; do
+          docker run --rm --user 1001 oplia-control-plane:ci python -c "import oplia_ctl.main, oplia_ctl.soar.exporter, oplia_ctl.finops.config, google.cloud.asset_v1, google.cloud.compute_v1, azure.mgmt.compute, oplia_ctl.identity.config, oplia_ctl.identity.providers.ad, oplia_ctl.dr.config, sqlglot, bson, confluent_kafka, pymysql, ldap; print('import ok, python-ldap', ldap.__version__, 'OpenLDAP', ldap.VENDOR_VERSION)"
+          for cmd in oplia-finops-scan oplia-finops-optimize oplia-aiops-escalator oplia-jit-worker oplia-identity-sweep oplia-dr-breaker; do
             docker run --rm --user 1001 oplia-control-plane:ci "$cmd" --help > /dev/null
           done
 
@@ -120,6 +125,38 @@ jobs:
           open(sys.argv[1] + "/am.yml", "w").write(yaml.safe_dump(d))
           PY
           amtool check-config "$RUNNER_TEMP/am.yml"
+
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: control-plane/deploy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: download kustomize and kubeconform (checksum verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl -sSfLO https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.6.7/CHECKSUMS | grep " kubeconform-linux-amd64.tar.gz$" | sha256sum -c -
+          tar xzf kubeconform-linux-amd64.tar.gz kubeconform
+          curl -sSfLO https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          curl -sSfL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/checksums.txt | grep " kustomize_v5.4.3_linux_amd64.tar.gz$" | sha256sum -c -
+          tar xzf kustomize_v5.4.3_linux_amd64.tar.gz
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: build and validate every kustomization (strict, Kubernetes 1.30)
+        run: |
+          set -euo pipefail
+          for k in $(find . -name kustomization.yaml -not -path "*/base/*" -exec dirname {} \; | sort); do
+            echo "::group::$k"
+            kustomize build "$k" | kubeconform -strict -summary -kubernetes-version 1.30.0 -skip ServiceExport -
+            echo "::endgroup::"
+          done
+      - name: CDC connector configs are valid JSON
+        run: for f in dr/cdc/*.json; do python3 -m json.tool "$f" > /dev/null; done
 
   terraform:
     runs-on: ubuntu-latest

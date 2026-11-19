@@ -8,6 +8,7 @@ from datetime import timedelta
 from fastapi import FastAPI
 
 import oplia_ctl.aiops.models
+import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models  # noqa: F401  (registers the JIT table)
 from oplia_ctl.aiops.config import AIOpsSettings, build_notifier, build_scheduler
@@ -31,6 +32,7 @@ from oplia_ctl.cloud.azure_isolation import AzureNicIsolationExecutor
 from oplia_ctl.cloud.k8s_isolation import K8sNamespaceIsolationExecutor
 from oplia_ctl.config import Settings, get_settings
 from oplia_ctl.db import Base, make_engine, make_session_factory
+from oplia_ctl.dr.config import DRSettings, build_breaker
 from oplia_ctl.drivers.cicd import build_cicd_driver
 from oplia_ctl.finops.config import FinOpsSettings, build_executors
 from oplia_ctl.finops.optimizer import WindowGuard
@@ -70,6 +72,12 @@ def build(settings: Settings) -> FastAPI:
         "isolate.azure": AzureNicIsolationExecutor(),
         "isolate.k8s": K8sNamespaceIsolationExecutor(),
     }
+    dr_cfg = DRSettings()
+    dr_breaker = None
+    if dr_cfg.stream:
+        dr_breaker = build_breaker(dr_cfg, gate=gate, session_factory=make_session_factory(engine),
+                                   secrets=secrets, client=client,
+                                   notifier=build_notifier(AIOpsSettings(), secrets, client))
     identity_cfg = IdentitySettings()
     jit: JitService | None = None
     providers = build_providers(identity_cfg, secrets, client)
@@ -130,6 +138,7 @@ def build(settings: Settings) -> FastAPI:
         alertmanager_token_secret=aiops_cfg.alertmanager_token_secret,
         finops_sf=make_session_factory(engine),
         jit=jit,
+        dr_breaker=dr_breaker,
         db_ping=sqlalchemy_ping(engine),
     )
 

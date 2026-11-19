@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 import oplia_ctl.aiops.models
+import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models  # noqa: F401
 from oplia_ctl.db import Base, make_engine, make_session_factory
@@ -54,7 +55,7 @@ def session_factory(tmp_path, _pg_engine) -> Iterator[sessionmaker[Session]]:
         with _pg_engine.begin() as conn:
             conn.execute(text("TRUNCATE action_proposals, audit_events, audit_head, control_flags, aiops_predictions, "
                               "finops_compliance_scans, finops_compliance_findings, finops_optimization_candidates, "
-                              "jit_access_requests "
+                              "jit_access_requests, dr_breaker_state, dr_incidents "
                               "RESTART IDENTITY"))
         yield make_session_factory(_pg_engine)
         return

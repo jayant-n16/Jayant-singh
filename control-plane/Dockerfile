@@ -9,7 +9,7 @@ USER 0
 RUN dnf install -y --setopt=install_weak_deps=0 openldap-devel cyrus-sasl-devel && dnf clean all
 USER 1001
 RUN pip install --no-cache-dir --upgrade pip \
- && pip wheel --no-cache-dir --wheel-dir /tmp/wheels ".[postgres,gcp,ad]"
+ && pip wheel --no-cache-dir --wheel-dir /tmp/wheels ".[postgres,gcp,ad,dr]"
 
 FROM registry.access.redhat.com/ubi9/python-312
 WORKDIR /opt/app-root/src

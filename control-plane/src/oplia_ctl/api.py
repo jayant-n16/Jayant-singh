@@ -26,6 +26,10 @@ POST /jit/requests/{id}/approve       approver (not the requester): approve and 
 POST /jit/requests/{id}/reject        approver
 POST /jit/requests/{id}/grant         approver: retry the grant of an approved request
 POST /jit/requests/{id}/revoke        approver or the requester: revoke before expiry
+GET  /dr/breakers                     DR circuit breaker state (operator/approver)
+GET  /dr/incidents                    DR incidents with findings and actions (operator/approver)
+POST /dr/breakers/{stream}/trip       approver: open the breaker manually (sever + alert + lock)
+POST /dr/breakers/{stream}/reset      approver: close it; release or discard the held bundle; unlock
 POST /kill-switch                     approver: engage/release
 GET  /audit/verify                    approver: verify the audit hash chain
 """
@@ -34,7 +38,7 @@ GET  /audit/verify                    approver: verify the audit hash chain
 import hmac
 import json
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -47,6 +51,7 @@ from oplia_ctl.aiops.escalation import EscalationScheduler, Prediction, Predicti
 from oplia_ctl.aiops.matrix import Alert
 from oplia_ctl.aiops.models import PredictionStatus
 from oplia_ctl.auth import AuthError, OIDCVerifier, Principal, verify_webhook
+from oplia_ctl.dr.breaker import CircuitBreaker, list_incidents
 from oplia_ctl.finops.compliance import list_findings, list_scans
 from oplia_ctl.finops.optimizer import MaintenanceWindowClosedError, list_candidates
 from oplia_ctl.identity.jit import JitConflictError, JitRequestError, JitService
@@ -76,6 +81,18 @@ class JitRequestBody(BaseModel):
     target_cloud_account: str = Field(min_length=1, max_length=128)
     expiration_minutes: int = Field(ge=1, le=1440)
     justification: str = Field(min_length=10, max_length=1000)
+
+
+class DrTripBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=5, max_length=2000)
+
+
+class DrResetBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision: Literal["release", "discard"]
+    unlock_targets: bool = False
+    note: str = Field(min_length=5, max_length=2000)
 
 
 class DecisionBody(BaseModel):
@@ -125,6 +142,7 @@ def create_app(
     alertmanager_token_secret: str = "alertmanager_webhook_token",  # noqa: S107 - a secret NAME
     finops_sf: sessionmaker[Session] | None = None,
     jit: JitService | None = None,
+    dr_breaker: CircuitBreaker | None = None,
     db_ping: Callable[[], None] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
@@ -459,6 +477,45 @@ def create_app(
         if not p.has_role(approver_role) and p.subject != current["requested_by"]:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "only an approver or the requester can revoke")
         return _jit_call(lambda: svc.revoke_now(request_id, p.subject))  # type: ignore[no-any-return]
+
+    # ------------------------------------------------------------------- DR
+    def _dr(stream: str | None = None) -> CircuitBreaker:
+        if dr_breaker is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "DR circuit breaker not configured")
+        if stream is not None and stream != dr_breaker.stream:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown stream {stream!r}")
+        return dr_breaker
+
+    @app.get("/dr/breakers")
+    def dr_breakers(_: Annotated[Principal, Depends(reader)]) -> list[dict[str, Any]]:
+        b = _dr()
+        state, incident, decision = b.store.state(b.stream)
+        return [{"stream": b.stream, "state": state, "incident_id": incident, "pending_decision": decision}]
+
+    @app.get("/dr/incidents")
+    def dr_incidents(_: Annotated[Principal, Depends(reader)], limit: int = 50) -> list[dict[str, Any]]:
+        b = _dr()
+        return list_incidents(b.session_factory, b.stream, limit)
+
+    @app.post("/dr/breakers/{stream}/trip")
+    def dr_trip(stream: str, body: DrTripBody, p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        b = _dr(stream)
+        if b.store.state(stream)[0] == "OPEN":
+            raise HTTPException(status.HTTP_409_CONFLICT, "breaker is already OPEN")
+        from oplia_ctl.dr.rules import Finding
+
+        incident = b.trip([], [Finding("manual", f"manual trip by {p.subject}: {body.reason}")], None,
+                          actor=p.subject)
+        return {"stream": stream, "state": "OPEN", "incident_id": incident}
+
+    @app.post("/dr/breakers/{stream}/reset")
+    def dr_reset(stream: str, body: DrResetBody, p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        b = _dr(stream)
+        try:
+            return b.reset(actor=p.subject, decision=body.decision, unlock_targets=body.unlock_targets,
+                           note=body.note)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
     # ---------------------------------------------------------- governance
     @app.post("/kill-switch")
