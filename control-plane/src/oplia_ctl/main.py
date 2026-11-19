@@ -7,7 +7,8 @@ from datetime import timedelta
 
 from fastapi import FastAPI
 
-import oplia_ctl.aiops.models  # noqa: F401  (registers the predictions table)
+import oplia_ctl.aiops.models
+import oplia_ctl.finops.models  # noqa: F401  (registers the compliance log tables)
 from oplia_ctl.aiops.config import AIOpsSettings, build_notifier, build_scheduler
 from oplia_ctl.aiops.engine import AIOpsEngine
 from oplia_ctl.aiops.escalation import EscalationScheduler
@@ -30,6 +31,8 @@ from oplia_ctl.cloud.k8s_isolation import K8sNamespaceIsolationExecutor
 from oplia_ctl.config import Settings, get_settings
 from oplia_ctl.db import Base, make_engine, make_session_factory
 from oplia_ctl.drivers.cicd import build_cicd_driver
+from oplia_ctl.finops.config import FinOpsSettings, build_executors
+from oplia_ctl.finops.optimizer import WindowGuard
 from oplia_ctl.http import ResilientClient
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
@@ -63,6 +66,8 @@ def build(settings: Settings) -> FastAPI:
         "isolate.azure": AzureNicIsolationExecutor(),
         "isolate.k8s": K8sNamespaceIsolationExecutor(),
     }
+    finops_cfg = FinOpsSettings()
+    executors.update(build_executors(finops_cfg, WindowGuard(finops_cfg.maintenance_windows)))
     aiops_cfg = AIOpsSettings()
     aiops_engine: AIOpsEngine | None = None
     escalation: EscalationScheduler | None = None
@@ -110,6 +115,7 @@ def build(settings: Settings) -> FastAPI:
         aiops_engine=aiops_engine,
         escalation=escalation,
         alertmanager_token_secret=aiops_cfg.alertmanager_token_secret,
+        finops_sf=make_session_factory(engine),
         db_ping=sqlalchemy_ping(engine),
     )
 

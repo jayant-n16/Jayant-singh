@@ -131,6 +131,39 @@ identities or data passes through one safety gate.
 * **Monitoring examples** – `examples/aiops/prometheus-rules.example.yaml` (with a `promtool` unit
   test) and `alertmanager-receiver.yaml`; both are checked in CI with `promtool` / `amtool`.
 
+## Phase 4 components – FinOps tag compliance and cost optimisation
+
+* **Tag compliance scanner** – `oplia-finops-scan` (CronJob). Inventories compute, storage and
+  database resources and checks the exact, case-sensitive tags `Owner`, `CostCenter`, `Environment`:
+  * AWS – EC2 instances, EBS volumes, S3 buckets, RDS instances/clusters, DynamoDB tables (service
+    APIs, so never-tagged resources are found too)
+  * Azure – VMs, scale sets, AKS, managed disks, storage accounts, SQL databases/managed instances,
+    PostgreSQL/MySQL flexible servers, Cosmos DB, Redis
+  * GCP – Cloud Asset Inventory (instances, GKE, disks, buckets, Cloud SQL, AlloyDB, Spanner,
+    Bigtable, Memorystore). **GCP label keys can only be lowercase**, so `owner` / `costcenter` /
+    `environment` labels satisfy the policy on GCP (configurable); Resource Manager tags with the
+    exact short names also count
+  * IBM Cloud – Global Search and Tagging API v3 (`key:value` user tags), queries configurable
+  * Each problem is classified as *missing*, *wrong case* (e.g. `owner` on AWS – reported, not
+    accepted) or *invalid* (empty value, or Environment outside `allowed_environments`)
+* **Compliance log database** – `finops_compliance_findings` (one row per non-compliant resource,
+  OPEN → RESOLVED as *tagged* or *resource not found*, never deleted) and `finops_compliance_scans`.
+  Findings of a cloud whose scan failed are left untouched. API: `GET /finops/findings`,
+  `GET /finops/scans`.
+* **Operations-desk alert** – one digest per scan with the new findings (Slack by default,
+  PagerDuty optional); known findings do not alert again, regressions do.
+* **Audit (dry-run) mode** – `oplia-finops-scan --audit` prints the non-compliant resources and
+  writes and sends nothing. The scanner never changes cloud resources in either mode.
+* **Cost-optimisation policy engine** – `oplia-finops-optimize observe` records idle resources
+  (unattached EBS volumes, unassociated Elastic IPs, unattached Azure disks, GCP disks without
+  users) with the time first seen idle; after the grace period (default 7 days) it proposes a
+  clean-up in the safety gate (proposal lifetime 8 days so it survives until a weekly window).
+  `oplia-finops-optimize window` executes **approved** clean-ups inside the configured maintenance
+  windows only; outside a window the API answers 409 and the proposal stays approved.
+  Executors re-check the live state, **snapshot disks first and delete only after the snapshot
+  completed**, and never touch resources tagged `OpliaRetain` or with a protected `Environment`.
+  API: `GET /finops/candidates`. Example settings: `examples/finops/finops.env.example`.
+
 ## API
 
 | Method | Path | Auth |
@@ -145,6 +178,7 @@ identities or data passes through one safety gate.
 | POST | `/webhooks/aiops/alert`, `/webhooks/aiops/prediction` | HMAC |
 | POST | `/webhooks/aiops/alertmanager` | bearer token (`alertmanager_webhook_token`) |
 | GET | `/aiops/predictions` | OIDC: operator or approver |
+| GET | `/finops/findings`, `/finops/scans`, `/finops/candidates` | OIDC: operator or approver |
 | POST | `/aiops/predictions/{id}/cancel` | OIDC: operator or approver |
 
 ## Configuration
@@ -165,7 +199,7 @@ secrets: webhook_hmac_secret, github_dispatch_token, gitlab_trigger_token,
 ## Run and test
 
 ```bash
-pip install -e ".[dev,postgres]"
+pip install -e ".[dev,postgres,gcp]"
 ruff check src tests migrations && mypy && bandit -r src -q
 pytest                                                     # SQLite
 OPLIA_TEST_DATABASE_URL=postgresql+psycopg://... pytest    # PostgreSQL, schema built by migrations
@@ -174,12 +208,14 @@ uvicorn oplia_ctl.main:app --port 8080                     # API
 oplia-soar-exporter                                        # SOAR daemon
 oplia-iac-lifecycle                                        # TTL scan (CronJob)
 oplia-aiops-escalator [--once]                             # predictive escalation
+oplia-finops-scan [--audit]                                # tag compliance (CronJob)
+oplia-finops-optimize observe|window                       # idle clean-up (CronJobs)
 ```
 
 ## What is and is not verified
 
 Verified in this repository (and re-run by `.github/workflows/control-plane-ci.yml`):
-lint (ruff), strict type checking (mypy), security scan (bandit), 202 tests on SQLite and 203 on PostgreSQL 16 (one concurrency test runs only on PostgreSQL) with the schema built by Alembic, migration up/down and model-drift check.
+lint (ruff), strict type checking (mypy), security scan (bandit), 236 tests on SQLite and 237 on PostgreSQL 16 (one concurrency test runs only on PostgreSQL) with the schema built by Alembic, migration up/down and model-drift check.
 External APIs are exercised with mocks: GitHub/GitLab/Jenkins/SIEM via HTTP mocks, AWS via
 moto, Azure and Kubernetes via fakes; the Azure request bodies were checked against the real
 SDK serializer.
@@ -189,6 +225,12 @@ SDK serializer.
 runbook images/digests are placeholders, and the Prometheus rules use common exporter metric names
 that must be matched to yours. Runbook Jobs are started, not awaited – their outcome is in the Job
 status/logs, not in the proposal result.
+
+**Phase 4 not yet verified live**: AWS calls run against moto (the real boto3 SDK and request
+shapes); Azure and GCP against fakes (the Azure snapshot body was checked with the real SDK
+serializer); IBM against HTTP mocks of the documented Global Search API. The default IBM queries
+(e.g. `service_name:databases-for-*`) must be checked against your account (`"fields": ["*"]`).
+Cost figures are not calculated: candidates show size only.
 
 **Not yet verified against live systems**: real GitHub/GitLab/Jenkins instances, a real SIEM,
 real AWS/Azure accounts, a real Kubernetes/OpenShift cluster, and the pipeline templates

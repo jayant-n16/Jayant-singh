@@ -68,7 +68,10 @@ jobs:
         run: docker build -t oplia-control-plane:ci control-plane
       - name: Smoke test image
         run: |
-          docker run --rm --user 1001 oplia-control-plane:ci python -c "import oplia_ctl.main, oplia_ctl.soar.exporter; print('import ok')"
+          docker run --rm --user 1001 oplia-control-plane:ci python -c "import oplia_ctl.main, oplia_ctl.soar.exporter, oplia_ctl.finops.config, google.cloud.asset_v1, google.cloud.compute_v1, azure.mgmt.compute; print('import ok')"
+          for cmd in oplia-finops-scan oplia-finops-optimize oplia-aiops-escalator; do
+            docker run --rm --user 1001 oplia-control-plane:ci "$cmd" --help > /dev/null
+          done
 
   monitoring-examples:
     runs-on: ubuntu-latest

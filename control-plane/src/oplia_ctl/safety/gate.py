@@ -45,6 +45,7 @@ from oplia_ctl.safety.models import (
 GENESIS_HASH = "0" * 64
 KILL_SWITCH_KEY = "kill_switch"
 _MAX_ERROR_LEN = 500
+MAX_PROPOSAL_TTL = timedelta(days=30)
 
 
 class GateError(Exception):
@@ -247,8 +248,15 @@ class SafetyGate:
         reason: str,
         requested_by: str,
         idempotency_key: str | None = None,
+        ttl: timedelta | None = None,
     ) -> Proposal:
-        """Create a proposal. With an idempotency key, a repeat returns the original."""
+        """Create a proposal. With an idempotency key, a repeat returns the original.
+
+        ``ttl`` overrides the gate's default lifetime for this proposal (e.g. clean-ups that must
+        survive until the next maintenance window); it is bounded to 1 minute .. 30 days.
+        """
+        if ttl is not None and not timedelta(minutes=1) <= ttl <= MAX_PROPOSAL_TTL:
+            raise ValueError("ttl must be between 1 minute and 30 days")
         now = self._clock()
         row = ProposalRow(
             id=str(uuid.uuid4()),
@@ -259,7 +267,7 @@ class SafetyGate:
             requested_by=requested_by,
             status=ProposalStatus.PENDING.value,
             created_at=now,
-            expires_at=now + self._ttl,
+            expires_at=now + (ttl or self._ttl),
             idempotency_key=idempotency_key,
         )
         try:

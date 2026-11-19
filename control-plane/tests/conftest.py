@@ -9,7 +9,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
-import oplia_ctl.aiops.models  # noqa: F401  (registers aiops tables)
+import oplia_ctl.aiops.models
+import oplia_ctl.finops.models  # noqa: F401
 from oplia_ctl.db import Base, make_engine, make_session_factory
 from oplia_ctl.safety import SafetyGate
 
@@ -50,7 +51,8 @@ def _pg_engine():
 def session_factory(tmp_path, _pg_engine) -> Iterator[sessionmaker[Session]]:
     if _pg_engine is not None:
         with _pg_engine.begin() as conn:
-            conn.execute(text("TRUNCATE action_proposals, audit_events, audit_head, control_flags, aiops_predictions "
+            conn.execute(text("TRUNCATE action_proposals, audit_events, audit_head, control_flags, aiops_predictions, "
+                              "finops_compliance_scans, finops_compliance_findings, finops_optimization_candidates "
                               "RESTART IDENTITY"))
         yield make_session_factory(_pg_engine)
         return

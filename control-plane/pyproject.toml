@@ -21,15 +21,17 @@ dependencies = [
   "azure-identity>=1.16",
   "azure-mgmt-network>=25.3",
   "azure-mgmt-resource>=23.0",
+  "azure-mgmt-compute>=33.0",
   "kubernetes>=29.0",
 ]
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
+gcp = ["google-cloud-asset>=3.26", "google-cloud-compute>=1.19"]
 dev = [
   "pytest>=8.0",
   "respx>=0.21",
-  "moto[ec2]>=5.0",
+  "moto[ec2,s3,rds,dynamodb]>=5.0",
   "ruff>=0.4",
   "mypy>=1.10",
   "bandit>=1.7",
@@ -40,6 +42,8 @@ dev = [
 [project.scripts]
 oplia-soar-exporter = "oplia_ctl.soar.exporter:main"
 oplia-aiops-escalator = "oplia_ctl.aiops.config:escalator_main"
+oplia-finops-scan = "oplia_ctl.finops.config:scan_main"
+oplia-finops-optimize = "oplia_ctl.finops.config:optimize_main"
 oplia-iac-lifecycle = "oplia_ctl.lifecycle.manager:main"
 
 [tool.setuptools.packages.find]
@@ -64,6 +68,7 @@ ignore = ["S101"]  # assert is used in tests only
 # Fields ending in *_secret hold the NAME of a secret resolved at runtime, never the secret value.
 "src/oplia_ctl/config.py" = ["S105"]
 "src/oplia_ctl/aiops/config.py" = ["S105"]
+"src/oplia_ctl/finops/config.py" = ["S105"]
 
 [tool.mypy]
 python_version = "3.11"

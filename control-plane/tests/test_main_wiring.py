@@ -76,3 +76,19 @@ def test_build_with_aiops_but_missing_runbooks_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("OPLIA_AIOPS_CLUSTER_NAME", "prod-eks-1")
     with pytest.raises(ValueError, match="unregistered runbooks"):
         build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'b.db'}", **OIDC))
+
+
+def test_build_registers_finops(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("OPLIA_FINOPS_MAINTENANCE_WINDOWS",
+                       json.dumps([{"days": ["sat"], "start": "02:00", "end": "06:00", "tz": "Asia/Kolkata"}]))
+    monkeypatch.setenv("OPLIA_FINOPS_POLICY", json.dumps({"allowed_environments": ["dev", "stg", "prod"]}))
+    from oplia_ctl.finops.config import FinOpsSettings
+
+    cfg = FinOpsSettings()
+    assert cfg.maintenance_windows[0].tz == "Asia/Kolkata"
+    assert cfg.policy.required == ["Owner", "CostCenter", "Environment"]
+    assert cfg.policy.allowed_environments == ["dev", "stg", "prod"]
+    app = build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'f.db'}", **OIDC))
+    assert TestClient(app).get("/finops/findings").status_code == 401  # route exists, auth enforced

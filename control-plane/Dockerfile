@@ -5,7 +5,7 @@ WORKDIR /opt/app-root/src
 COPY --chown=1001:0 pyproject.toml README.md ./
 COPY --chown=1001:0 src ./src
 RUN pip install --no-cache-dir --upgrade pip \
- && pip wheel --no-cache-dir --wheel-dir /tmp/wheels ".[postgres]"
+ && pip wheel --no-cache-dir --wheel-dir /tmp/wheels ".[postgres,gcp]"
 
 FROM registry.access.redhat.com/ubi9/python-312
 WORKDIR /opt/app-root/src

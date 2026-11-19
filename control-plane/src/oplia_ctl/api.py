@@ -16,6 +16,9 @@ POST /webhooks/aiops/alertmanager     Alertmanager webhook (bearer token) -> sam
 POST /webhooks/aiops/prediction       signed predictive risk -> escalation schedule
 GET  /aiops/predictions               list scheduled/escalated predictions (operator/approver)
 POST /aiops/predictions/{id}/cancel   operator/approver: withdraw a scheduled prediction
+GET  /finops/findings                 tag-compliance log (operator/approver; ?status=OPEN&cloud=aws)
+GET  /finops/scans                    recent compliance scans (operator/approver)
+GET  /finops/candidates               idle resources tracked for clean-up (operator/approver)
 POST /kill-switch                     approver: engage/release
 GET  /audit/verify                    approver: verify the audit hash chain
 """
@@ -29,6 +32,7 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import text
+from sqlalchemy.orm import Session, sessionmaker
 
 from oplia_ctl.aiops.alertmanager import to_alerts
 from oplia_ctl.aiops.engine import AIOpsEngine, AlertRejectedError
@@ -36,6 +40,8 @@ from oplia_ctl.aiops.escalation import EscalationScheduler, Prediction, Predicti
 from oplia_ctl.aiops.matrix import Alert
 from oplia_ctl.aiops.models import PredictionStatus
 from oplia_ctl.auth import AuthError, OIDCVerifier, Principal, verify_webhook
+from oplia_ctl.finops.compliance import list_findings, list_scans
+from oplia_ctl.finops.optimizer import MaintenanceWindowClosedError, list_candidates
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
 from oplia_ctl.safety import (
     Executor,
@@ -100,6 +106,7 @@ def create_app(
     aiops_engine: AIOpsEngine | None = None,
     escalation: EscalationScheduler | None = None,
     alertmanager_token_secret: str = "alertmanager_webhook_token",  # noqa: S107 - a secret NAME
+    finops_sf: sessionmaker[Session] | None = None,
     db_ping: Callable[[], None] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
@@ -332,7 +339,38 @@ def create_app(
         if executor is None:
             raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED,
                                 f"no executor registered for {current['action_type']}")
+        ready = getattr(executor, "check_ready", None)
+        if ready is not None:
+            try:
+                ready(current["payload"])
+            except MaintenanceWindowClosedError as exc:
+                raise HTTPException(status.HTTP_409_CONFLICT, f"not executed: {exc}") from None
+            except ValueError as exc:
+                raise HTTPException(422, f"invalid payload: {exc}") from None
         return _gate_call(lambda: gate.execute(proposal_id, executor, p.subject))
+
+    # --------------------------------------------------------------- finops
+    def _finops() -> sessionmaker[Session]:
+        if finops_sf is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "FinOps store not configured")
+        return finops_sf
+
+    @app.get("/finops/findings")
+    def finops_findings(_: Annotated[Principal, Depends(reader)], status_filter: str | None = None,
+                        cloud: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if status_filter not in (None, "OPEN", "RESOLVED"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "status_filter must be OPEN or RESOLVED")
+        if cloud not in (None, "aws", "azure", "gcp", "ibm"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "cloud must be aws, azure, gcp or ibm")
+        return list_findings(_finops(), status=status_filter, cloud=cloud, limit=limit)
+
+    @app.get("/finops/scans")
+    def finops_scans(_: Annotated[Principal, Depends(reader)], limit: int = 20) -> list[dict[str, Any]]:
+        return list_scans(_finops(), limit)
+
+    @app.get("/finops/candidates")
+    def finops_candidates(_: Annotated[Principal, Depends(reader)], limit: int = 200) -> list[dict[str, Any]]:
+        return list_candidates(_finops(), limit)
 
     # ---------------------------------------------------------- governance
     @app.post("/kill-switch")
