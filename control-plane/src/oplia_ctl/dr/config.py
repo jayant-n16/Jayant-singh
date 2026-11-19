@@ -38,6 +38,9 @@ class DRSettings(BaseSettings):
     quarantine_dir: str = "/var/lib/oplia/dr-quarantine"
     lock_timeout_seconds: Annotated[float, Field(ge=5, le=600)] = 60.0
     max_bundle_records: Annotated[int, Field(ge=1, le=10000)] = 500
+    transit_mount: str = "transit-dr-broker"
+    transit_key: str = ""                              # set (e.g. circuit-breaker-key) to protect dumps
+    sign_bundles: bool = False                         # HMAC header on every forwarded record (needs transit_key)
 
     def rate_monitor(self) -> RateMonitor:
         return RateMonitor(spike_percent=self.spike_percent, window_seconds=self.window_seconds,
@@ -49,11 +52,24 @@ def build_breaker(cfg: DRSettings, *, gate: Any, session_factory: Any, secrets: 
     names = [t.name for t in cfg.targets]
     if len(names) != len(set(names)):
         raise ValueError("DR target names must be unique")
-    return CircuitBreaker(
+    return CircuitBreaker(protector=build_protector(cfg, secrets),
         stream=cfg.stream, gate=gate, session_factory=session_factory, secrets=secrets, client=client,
         lockers=[build_locker(t, secrets) for t in cfg.targets], webhooks=cfg.webhooks, notifier=notifier,
         quarantine_dir=cfg.quarantine_dir, rate=cfg.rate_monitor(), block_undecodable=cfg.block_undecodable,
         lock_timeout_seconds=cfg.lock_timeout_seconds)
+
+
+def build_protector(cfg: DRSettings, secrets: Any) -> Any:
+    if not cfg.transit_key:
+        if cfg.sign_bundles:
+            raise ValueError("OPLIA_DR_SIGN_BUNDLES needs OPLIA_DR_TRANSIT_KEY")
+        return None
+    client = getattr(secrets, "client", None)
+    if client is None:
+        raise ValueError("OPLIA_DR_TRANSIT_KEY needs OPLIA_SECRET_PROVIDER=vault")
+    from oplia_ctl.dr.crypto import TransitProtector
+
+    return TransitProtector(client, cfg.transit_mount, cfg.transit_key)
 
 
 def main() -> None:  # pragma: no cover - process wiring, exercised in deployment
@@ -90,7 +106,10 @@ def main() -> None:  # pragma: no cover - process wiring, exercised in deploymen
     extra = {"sasl.password": secrets.get(cfg.kafka_sasl_password_secret)} if cfg.kafka_sasl_password_secret else {}
     source = KafkaSource(config={**cfg.kafka_source, **extra}, topics=cfg.source_topics, fmt=cfg.source_format,
                          engine=cfg.source_engine, sql_dialect=cfg.sql_dialect, max_records=cfg.max_bundle_records)
+    protector = build_protector(cfg, secrets)
+    signer = protector.sign if (cfg.sign_bundles and protector is not None) else None
     relay = Relay(breaker=breaker, source=source,
-                  sink_factory=lambda: KafkaSink(config={**cfg.kafka_sink, **extra}, topic=cfg.sink_topic),
+                  sink_factory=lambda: KafkaSink(config={**cfg.kafka_sink, **extra}, topic=cfg.sink_topic,
+                                                 signer=signer),
                   session_factory=sf, rate_factory=cfg.rate_monitor)
     relay.run_forever()

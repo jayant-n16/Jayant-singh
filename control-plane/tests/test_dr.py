@@ -374,8 +374,8 @@ class FakeProducer:
     def __init__(self, cfg, fail=False):
         self.cfg, self.fail, self.produced, self.purged = cfg, fail, [], False
 
-    def produce(self, topic, value, on_delivery):
-        self.produced.append((topic, value))
+    def produce(self, topic, value, on_delivery, headers=None):
+        self.produced.append((topic, value) if headers is None else (topic, value, headers))
         on_delivery("broker down" if self.fail else None, None)
 
     def flush(self, timeout):
@@ -399,6 +399,24 @@ def test_kafka_sink_acks_and_sever():
     failing = KafkaSink(config={}, topic="t", producer_factory=lambda cfg: FakeProducer(cfg, fail=True))
     with pytest.raises(RuntimeError, match="did not acknowledge"):
         failing.send(GOOD)
+
+
+def test_kafka_sink_signs_every_record_in_one_batch_call():
+    calls = []
+
+    def signer(values):
+        calls.append(list(values))
+        return [f"vault:v1:mac-{i}" for i in range(len(values))]
+
+    made = []
+    sink = KafkaSink(config={}, topic="dr.orders", signer=signer,
+                     producer_factory=lambda cfg: made.append(FakeProducer(cfg)) or made[-1])
+    sink.send([Record("debezium", {"op": "c"}, "postgres"), Record("debezium", "raw", "postgres")])
+    assert calls == [[b'{"op": "c"}', b"raw"]]
+    assert made[0].produced == [("dr.orders", b'{"op": "c"}', [("oplia-hmac", b"vault:v1:mac-0")]),
+                                ("dr.orders", b"raw", [("oplia-hmac", b"vault:v1:mac-1")])]
+    with pytest.raises(ValueError):  # a signer returning the wrong number of MACs is never ignored
+        KafkaSink(config={}, topic="t", signer=lambda v: [], producer_factory=FakeProducer).send(GOOD)
 
 
 # ======================================================= lockers vs real servers

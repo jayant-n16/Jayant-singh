@@ -22,7 +22,7 @@ spec:
         oplia.io/stream: orders-pg
     spec:
       serviceAccountName: oplia-dr-breaker
-      automountServiceAccountToken: false
+      automountServiceAccountToken: false   # no API-server credentials; the Vault login token is projected below
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
@@ -36,11 +36,21 @@ spec:
           envFrom:
             - configMapRef:
                 name: oplia-dr-orders          # OPLIA_DR_* settings (see examples/dr/dr.env.example)
+            - configMapRef:
+                name: oplia-vault              # OPLIA_VAULT_* (see examples/vault/vault.env.example)
             - secretRef:
-                name: oplia-control-plane-env  # OPLIA_DATABASE_URL etc. (or Vault agent, Phase 7)
+                name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
           env:
             - name: OPLIA_DR_QUARANTINE_DIR
               value: /var/lib/oplia/dr-quarantine
+            - name: OPLIA_SECRET_PROVIDER
+              value: vault
+            - name: OPLIA_VAULT_AUTH_METHOD
+              value: kubernetes
+            - name: OPLIA_VAULT_KUBERNETES_ROLE
+              value: oplia-control-plane
+            - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+              value: /var/run/secrets/vault/token
           resources:
             requests:
               cpu: 500m
@@ -57,7 +67,16 @@ spec:
               mountPath: /var/lib/oplia/dr-quarantine
             - name: tmp
               mountPath: /tmp
+            - name: vault-token                # short-lived, auto-rotated token used only for Vault login
+              mountPath: /var/run/secrets/vault
+              readOnly: true
       volumes:
+        - name: vault-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
         - name: quarantine
           persistentVolumeClaim:
             claimName: oplia-dr-quarantine

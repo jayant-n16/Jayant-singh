@@ -125,6 +125,7 @@ class CircuitBreaker:
         rate: RateMonitor | None = None,
         block_undecodable: bool = True,
         lock_timeout_seconds: float = 60.0,
+        protector: Any = None,     # TransitProtector: encrypt + HMAC incident dumps with Vault Transit
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if not stream or len(stream) > 64:
@@ -142,6 +143,7 @@ class CircuitBreaker:
         self._rate = rate or RateMonitor()
         self._block_undecodable = block_undecodable
         self._lock_timeout = lock_timeout_seconds
+        self._protector = protector
         self._clock = clock
 
     @property
@@ -189,8 +191,18 @@ class CircuitBreaker:
             "records": [{"format": r.format, "engine": r.engine, "position": r.position,
                          "payload": payload_for_dump(r)} for r in bundle],
         }
-        body = json.dumps(dump, sort_keys=True, default=str).encode()
-        digest = hashlib.sha256(body).hexdigest()
+        plain = json.dumps(dump, sort_keys=True, default=str).encode()
+        digest = hashlib.sha256(plain).hexdigest()
+        body = plain
+        share = True  # whether the dump may leave this process (webhooks)
+        if self._protector is not None:
+            try:
+                body = self._protector.protect(plain)
+                actions["dump_protection"] = f"vault transit {self._protector.mount}/{self._protector.key}"
+            except Exception as exc:
+                # keep the evidence locally (0600) but do not send unencrypted data off the host
+                share = False
+                actions["dump_protection"] = f"failed ({type(exc).__name__}): plaintext kept locally, not sent"
         dump_path: str | None = None
         try:
             self._qdir.mkdir(parents=True, exist_ok=True)
@@ -203,7 +215,10 @@ class CircuitBreaker:
             dump_path = str(path)
         except OSError as exc:
             actions["quarantine_file"] = f"failed: {exc}"
-        actions["webhooks"] = self._post_dump(body, incident_id)
+        actions["webhooks"] = (self._post_dump(body, incident_id) if share else self._post_dump(
+            json.dumps({"incident_id": incident_id, "stream": self.stream, "trigger": trigger,
+                        "dump_sha256": digest, "dump": "withheld: encryption unavailable, see quarantine file"
+                        }).encode(), incident_id))
         actions["notify"] = self._notify(incident_id, trigger, findings, digest)
 
         # C. lock DR targets read-only (in parallel, bounded), honouring dry-run

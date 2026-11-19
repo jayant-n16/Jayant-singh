@@ -41,7 +41,7 @@ jobs:
       - name: System packages (python-ldap build headers, OpenLDAP for AD-driver integration tests)
         run: |
           sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q libldap-dev libsasl2-dev slapd ldap-utils
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q libldap-dev libsasl2-dev slapd ldap-utils shellcheck
           sudo systemctl stop slapd || true
           # the packaged AppArmor profile only allows slapd's default paths; the test server runs from RUNNER_TEMP
           if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true; fi
@@ -54,6 +54,23 @@ jobs:
         run: scripts/test-slapd.sh "$RUNNER_TEMP/slapd" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: Start test MySQL server
         run: scripts/test-mysql.sh "$RUNNER_TEMP/mysql" | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: OpenBao 2.5.3 for the Vault driver tests (checksum verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          base=https://github.com/openbao/openbao/releases/download/v2.5.3
+          curl -sSfLO "$base/bao_2.5.3_Linux_x86_64.tar.gz"
+          curl -sSfL "$base/checksums-linux.txt" | grep " bao_2.5.3_Linux_x86_64.tar.gz$" | sha256sum -c -
+          mkdir -p bao-bin && tar xzf bao_2.5.3_Linux_x86_64.tar.gz -C bao-bin bao
+          echo "$RUNNER_TEMP/bao-bin" >> "$GITHUB_PATH"
+      - name: Start test OpenBao server
+        run: |
+          set -euo pipefail
+          out=$(BAO_BIN="$RUNNER_TEMP/bao-bin/bao" scripts/test-openbao.sh "$RUNNER_TEMP/bao")
+          echo "::add-mask::$(echo "$out" | sed -n 's/^export BAO_TOKEN=//p')"
+          echo "$out" | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: Shell scripts (shellcheck)
+        run: shellcheck scripts/*.sh deploy/vault/scripts/*.sh
       - name: Lint
         run: ruff check src tests migrations
       - name: Type check
@@ -62,6 +79,11 @@ jobs:
         run: bandit -r src -q
       - name: Tests (SQLite)
         run: pytest -rs
+      - name: Vault deploy scripts against OpenBao and PostgreSQL
+        env:
+          VAULT_CLI: bao
+          OPLIA_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/oplia_test
+        run: scripts/test-vault-deploy.sh
       - name: Tests (PostgreSQL, schema from migrations)
         env:
           OPLIA_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/oplia_test
@@ -155,8 +177,21 @@ jobs:
             kustomize build "$k" | kubeconform -strict -summary -kubernetes-version 1.30.0 -skip ServiceExport -
             echo "::endgroup::"
           done
+          kubeconform -strict -summary -kubernetes-version 1.30.0 vault/k8s/token-reviewer.yaml
       - name: CDC connector configs are valid JSON
         run: for f in dr/cdc/*.json; do python3 -m json.tool "$f" > /dev/null; done
+      - name: OTel sidecar config loads in the pinned collector (otelcol validate)
+        run: |
+          set -euo pipefail
+          d=$(mktemp -d)
+          # the block scalar under "config.yaml: |" (indented 4 spaces) is the collector config
+          awk 'f && /^    /{print substr($0,5); next} f && !/^[[:space:]]*$/{f=0} /^  config.yaml: \|/{f=1}' \
+            apps/base/otel-collector-config.yaml > "$d/config.yaml"
+          test -s "$d/config.yaml"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=otel-test -keyout "$d/ca.key" -out "$d/ca.crt" 2>/dev/null
+          chmod 0644 "$d"/*
+          docker run --rm -v "$d/config.yaml:/cfg/config.yaml:ro" -v "$d/ca.crt:/etc/otel/ca/ca.crt:ro" \
+            otel/opentelemetry-collector:0.163.2 validate --config=/cfg/config.yaml
 
   terraform:
     runs-on: ubuntu-latest

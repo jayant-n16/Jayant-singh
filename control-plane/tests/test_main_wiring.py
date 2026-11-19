@@ -34,9 +34,24 @@ def test_prod_refuses_unsafe_settings(over, msg):
         Settings(**(base | over)).assert_production_safe()
 
 
-def test_prod_autonomous_requires_explicit_opt_in():
+def test_prod_autonomous_requires_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("OPLIA_VAULT_ADDR", "https://vault.example.com:8200")
     Settings(environment="prod", database_url="postgresql+psycopg://u@h/db", dry_run=False,
-             require_approval=False, allow_autonomous_in_prod=True, **OIDC).assert_production_safe()
+             require_approval=False, allow_autonomous_in_prod=True, secret_provider="vault",
+             **OIDC).assert_production_safe()
+
+
+def test_prod_requires_vault_over_https(monkeypatch):
+    base = {"environment": "prod", "database_url": "postgresql+psycopg://u@h/db", **OIDC}
+    with pytest.raises(RuntimeError, match="OPLIA_SECRET_PROVIDER=vault"):
+        Settings(**base).assert_production_safe()
+    monkeypatch.setenv("OPLIA_VAULT_ADDR", "http://vault:8200")
+    with pytest.raises(RuntimeError, match="https"):
+        Settings(**base, secret_provider="vault").assert_production_safe()
+    monkeypatch.setenv("OPLIA_VAULT_ADDR", "https://vault:8200")
+    monkeypatch.setenv("OPLIA_VAULT_ALLOW_INSECURE_HTTP", "true")
+    with pytest.raises(RuntimeError, match="allow_insecure_http"):
+        Settings(**base, secret_provider="vault").assert_production_safe()
 
 
 def test_ambient_ci_variables_cannot_redirect_remediation(monkeypatch):

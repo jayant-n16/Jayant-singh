@@ -1,0 +1,38 @@
+# Apply in EACH cluster (EKS, AKS, GKE, IKS). Vault uses this account's token to call the cluster's
+# TokenReview API when a pod logs in (auth/kubernetes-<cloud>). Extract the token for
+# vault-k8s-auth.sh with:
+#   kubectl -n vault-auth get secret vault-auth-reviewer -o jsonpath='{.data.token}' | base64 -d > reviewer.jwt
+#   kubectl config view --raw --minify -o jsonpath='{.clusters[0].cluster.certificate-authority-data}' | base64 -d > ca.pem
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault-auth
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-auth
+  namespace: vault-auth
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-auth-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator          # allows TokenReview / SubjectAccessReview only
+subjects:
+  - kind: ServiceAccount
+    name: vault-auth
+    namespace: vault-auth
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-auth-reviewer
+  namespace: vault-auth
+  annotations:
+    kubernetes.io/service-account.name: vault-auth
+type: kubernetes.io/service-account-token

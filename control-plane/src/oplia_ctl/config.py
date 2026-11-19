@@ -108,6 +108,14 @@ class Settings(BaseSettings):
                 "prod refuses autonomous mode (no approval, no dry-run) unless "
                 "OPLIA_ALLOW_AUTONOMOUS_IN_PROD=true"
             )
+        if self.secret_provider != "vault":  # nosec B105 - provider name, not a password
+            problems.append("prod requires OPLIA_SECRET_PROVIDER=vault (environment secrets are for development)")
+        else:
+            from oplia_ctl.vault import VaultSettings
+
+            vault = VaultSettings()
+            if not vault.addr.startswith("https://") or vault.allow_insecure_http:
+                problems.append("prod requires an https:// OPLIA_VAULT_ADDR without allow_insecure_http")
         if problems:
             raise RuntimeError("; ".join(problems))
 

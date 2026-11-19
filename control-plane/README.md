@@ -229,6 +229,41 @@ identities or data passes through one safety gate.
 * Settings: `examples/dr/dr.env.example`. MySQL lock account needs `SYSTEM_VARIABLES_ADMIN`,
   `REPLICATION_SLAVE_ADMIN`, `REPLICATION CLIENT`.
 
+## Phase 7 components – Vault security engine, workload identity and rollout
+
+* **Vault driver** (`src/oplia_ctl/vault.py`, the document's `vault_secrets_driver`): AppRole
+  (`role_id`/`secret_id` read from files) or Kubernetes auth (projected service-account token);
+  token renewal before expiry and one re-login on 403; KV v2; Transit encrypt/decrypt/HMAC/verify;
+  dynamic database credentials and lease revocation. Only `https://` (plain HTTP is a local-dev
+  switch that production start-up refuses). Tokens and values never appear in logs or errors.
+* **`VaultSecretProvider`** (`OPLIA_SECRET_PROVIDER=vault`): every secret name used by Phases 1–6
+  resolves to `secret/data/coc/<name>` field `value` (the existing OPLIA paths), cached briefly.
+  **Production requires it**: `prod` refuses to start with environment secrets or a non-https Vault.
+* **DR circuit breaker + Transit**: with `OPLIA_DR_TRANSIT_KEY=circuit-breaker-key` incident dumps
+  are encrypted (`transit-dr-broker`) with an HMAC and SHA-256 integrity envelope; webhooks receive
+  the envelope, never plaintext (if encryption fails the plaintext stays only in the 0600 local file
+  and webhooks get a summary). `OPLIA_DR_SIGN_BUNDLES=true` adds an `oplia-hmac` header (Transit HMAC)
+  to every record forwarded to the DR topic.
+* **Vault deployment** (`deploy/vault/`): server config (Raft HA, TLS, KMS auto-unseal), policies
+  `app-database-access`, `oplia-control-plane`, `ci-runner` (least privilege, explicit denials of
+  administrative paths), scripts `vault-bootstrap.sh` (idempotent), `vault-database.sh` (PostgreSQL,
+  MySQL, MongoDB dynamic credentials), `vault-k8s-auth.sh` (`auth/kubernetes-aws|azure|gcp|ibm`,
+  token reviewer, host, CA), `vault-roles.sh` (`app-service-account`/`production` -> 60 min tokens,
+  24 h max; AppRoles for GitHub Actions, GitLab CI, Jenkins and the daemons),
+  `import-static-secrets.sh` (Entra/Okta/AD/CI keys, typed at a hidden prompt).
+  **PostgreSQL 16+ prerequisite**: `ALTER ROLE vault_admin SET createrole_self_grant = 'set, inherit'`,
+  otherwise lease revocation cannot drop the users Vault created (`deploy/vault/server/README.md`).
+* **Workloads** (`deploy/apps/`): Alpine, Ubuntu and Distroless Deployments with the Vault Agent
+  injector (credentials file `/vault/secrets/db.env`, 0400, owned by the app UID, lease revoked on
+  shutdown), Prometheus annotations, Datadog unified tags + OpenMetrics check, Dynatrace OneAgent
+  injection and an OpenTelemetry collector sidecar; one overlay per cloud.
+* **Control plane on Kubernetes** (`deploy/control-plane/`): API (2 replicas, PDB, probes), migration
+  Job, workers, CronJobs (including a suspended read-only FinOps audit), all logging in to Vault with a
+  projected 1-hour token; the DR breaker manifest uses the same pattern.
+* **Rollout runbook** (`docs/rollout-runbook.md`): five phases with verification commands, gates,
+  stop thresholds (5xx > 0.01 %, crash loops, replication lag > 2 s, Vault p99 > 50 ms) and rollback.
+* Settings: `examples/vault/vault.env.example`.
+
 ## API
 
 | Method | Path | Auth |
@@ -254,7 +289,8 @@ identities or data passes through one safety gate.
 ## Configuration
 
 Settings are `OPLIA_*` environment variables (`src/oplia_ctl/config.py`). Secrets are referenced
-by **name** and resolved at runtime (`OPLIA_SECRET_<NAME>` in dev; Vault in Phase 7). Key ones:
+by **name** and resolved at runtime (`OPLIA_SECRET_<NAME>` in dev; Vault `secret/data/coc/<name>` in
+stg/prod, `OPLIA_SECRET_PROVIDER=vault`, see `examples/vault/vault.env.example`). Key ones:
 
 ```
 OPLIA_ENVIRONMENT=prod
@@ -283,12 +319,15 @@ oplia-finops-optimize observe|window                       # idle clean-up (Cron
 oplia-jit-worker [--once]                                  # JIT revocation every 60 s
 oplia-identity-sweep                                       # 90-day inactive accounts (CronJob)
 oplia-dr-breaker                                           # DR circuit breaker (one per stream)
+scripts/test-openbao.sh DIR                                # throwaway OpenBao for the Vault tests
+VAULT_CLI=bao scripts/test-vault-deploy.sh                 # deploy/vault scripts end to end
+shellcheck scripts/*.sh deploy/vault/scripts/*.sh
 ```
 
 ## What is and is not verified
 
 Verified in this repository (and re-run by `.github/workflows/control-plane-ci.yml`):
-lint (ruff), strict type checking (mypy), security scan (bandit), 236 tests on SQLite and 237 on PostgreSQL 16 (one concurrency test runs only on PostgreSQL) with the schema built by Alembic, migration up/down and model-drift check.
+lint (ruff), strict type checking (mypy, Python 3.12 and 3.13), security scan (bandit), shellcheck, 330 tests on PostgreSQL 16 with the schema built by Alembic (326 on SQLite; 4 need PostgreSQL), with real OpenLDAP, MySQL 8.0 and OpenBao 2.5.3 test servers, migration up/down and model-drift check, `kustomize` + `kubeconform -strict` for every manifest.
 External APIs are exercised with mocks: GitHub/GitLab/Jenkins/SIEM via HTTP mocks, AWS via
 moto, Azure and Kubernetes via fakes; the Azure request bodies were checked against the real
 SDK serializer.
@@ -317,6 +356,18 @@ MySQL 8.0** (lock, verify, writes refused, unlock); MongoDB and CockroachDB lock
 fakes. Kafka was not run - the Kafka adapter is tested with fakes of the confluent-kafka API. The
 CockroachDB manifests pass `kustomize` + `kubeconform -strict` but were not applied to a cluster,
 and the SQL was not executed against CockroachDB.
+
+**Phase 7 not yet verified live**: the Vault driver, policies, scripts and the agent template ran
+against **OpenBao 2.5.3** (the open-source fork that implements the Vault HTTP API), not HashiCorp
+Vault: AppRole and Kubernetes-auth logins (Kubernetes via a TLS TokenReview endpoint in the test),
+KV v2, Transit (encryption, HMAC, tamper detection), effective policy capabilities, dynamic
+PostgreSQL credentials (login, wrong password refused, revocation leaves no user behind), every
+`deploy/vault` script run twice (idempotent), and a real `bao agent` rendering the injector template
+into working credentials. Not run: `vault-server.hcl` (needs TLS and KMS), the MySQL/MongoDB parts of
+`vault-database.sh`, the injector in a real cluster, Datadog/Dynatrace agents, and the global load
+balancer steps of the runbook (provider tools, not OPLIA code). OpenBao refuses enabling audit
+devices through the API; `vault-bootstrap.sh` then prints a warning and the audit device must be in
+the server configuration.
 
 **Not yet verified against live systems**: real GitHub/GitLab/Jenkins instances, a real SIEM,
 real AWS/Azure accounts, a real Kubernetes/OpenShift cluster, and the pipeline templates

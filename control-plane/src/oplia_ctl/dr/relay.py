@@ -86,7 +86,8 @@ class KafkaSource:
 
 class KafkaSink:
     def __init__(self, *, config: dict[str, Any], topic: str, flush_timeout: float = 30.0,
-                 producer_factory: Callable[[dict[str, Any]], Any] | None = None) -> None:
+                 producer_factory: Callable[[dict[str, Any]], Any] | None = None,
+                 signer: Callable[[list[bytes]], list[str]] | None = None) -> None:
         cfg = {**config, "enable.idempotence": True, "acks": "all"}
         if producer_factory is None:
             from confluent_kafka import Producer
@@ -95,6 +96,7 @@ class KafkaSink:
         self._p: Any = producer_factory(cfg)
         self._topic = topic
         self._timeout = flush_timeout
+        self._signer = signer  # adds an "oplia-hmac" header (Vault Transit HMAC) to every record
 
     def send(self, records: list[Record]) -> None:
         if self._p is None:
@@ -105,10 +107,15 @@ class KafkaSink:
             if err is not None:
                 errors.append(str(err))
 
-        for r in records:
-            value = r.payload if isinstance(r.payload, bytes) else (
-                r.payload.encode() if isinstance(r.payload, str) else json.dumps(r.payload).encode())
-            self._p.produce(self._topic, value=value, on_delivery=on_delivery)
+        values = [r.payload if isinstance(r.payload, bytes) else (
+            r.payload.encode() if isinstance(r.payload, str) else json.dumps(r.payload).encode()) for r in records]
+        macs = self._signer(values) if self._signer is not None and values else [None] * len(values)
+        for value, mac in zip(values, macs, strict=True):
+            if mac:
+                self._p.produce(self._topic, value=value, headers=[("oplia-hmac", mac.encode())],
+                                on_delivery=on_delivery)
+            else:
+                self._p.produce(self._topic, value=value, on_delivery=on_delivery)
         remaining = self._p.flush(self._timeout)
         if remaining or errors:
             raise RuntimeError(f"destination did not acknowledge: {remaining} pending, errors {errors[:3]}")
