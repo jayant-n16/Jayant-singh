@@ -51,6 +51,32 @@ identities or data passes through one safety gate.
   * Azure – attach a deny-all NSG (priority 100) to the NIC
   * Kubernetes – deny-all NetworkPolicy; refuses `kube-*`, `default`, `openshift-*`
 
+## Phase 2 components
+
+* **Remote state backends** (`terraform/modules/`, bootstrap root in `terraform/examples/state-backends`):
+  * AWS – S3 bucket (versioned, SSE-KMS with a rotating key, public access blocked, TLS-only
+    policy, noncurrent-version expiry) and a DynamoDB lock table (PITR, KMS, deletion protection)
+  * Azure – StorageV2 account (TLS 1.2, shared keys disabled / Entra ID only, infrastructure
+    encryption, blob versioning and soft delete, network rules default Deny, `CanNotDelete`
+    lock, optional blob audit logs to Log Analytics) and a private container. Locking is the
+    azurerm backend's native blob lease – there is no separate switch to enable.
+  * Eight checkov findings are skipped in code with a written reason each (e.g. cross-region
+    replication and private endpoints are caller decisions).
+* **TTL lifecycle manager** – `oplia-iac-lifecycle`, intended to run as a CronJob. It reads
+  resources tagged `LifecycleTTL` (`15m`…`90d`) plus `CreatedAt` (ISO-8601 with timezone),
+  `OpliaBlueprint` and `OpliaZone` from the AWS Resource Groups Tagging API and Azure Resource
+  Manager, groups them into stacks, and for every expired stack records an `iac.destroy`
+  proposal. It never deletes anything itself: after approval the same CI/CD drivers dispatch the
+  pipeline with `OPERATION=destroy`, which runs `plan -destroy` and applies only that reviewed plan.
+  * stacks containing a resource tagged `Environment=prod|production|prd` are never proposed
+  * stacks with inconsistent tags, unknown blueprints or unsupported clouds are skipped and reported
+  * one open proposal per stack; a new attempt is proposed only after the previous one EXPIRED or
+    FAILED; a REJECTED stack is not proposed again
+  * the pipelines refuse `destroy` unless the repository/project/job variable
+    `OPLIA_ALLOW_DESTROY=true` is set – leave it unset for production infrastructure
+  * configuration: `OPLIA_LIFECYCLE_AWS_REGIONS`, `OPLIA_LIFECYCLE_AZURE_SUBSCRIPTIONS`
+    (JSON lists), `OPLIA_LIFECYCLE_TARGET_CICD`; exit code 2 when any source failed
+
 ## API
 
 | Method | Path | Auth |
@@ -88,6 +114,7 @@ OPLIA_TEST_DATABASE_URL=postgresql+psycopg://... pytest    # PostgreSQL, schema 
 OPLIA_DATABASE_URL=postgresql+psycopg://... alembic upgrade head && alembic check
 uvicorn oplia_ctl.main:app --port 8080                     # API
 oplia-soar-exporter                                        # SOAR daemon
+oplia-iac-lifecycle                                        # TTL scan (CronJob)
 ```
 
 ## What is and is not verified

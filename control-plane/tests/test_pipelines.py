@@ -25,11 +25,11 @@ def _load(path: Path) -> dict:
 
 def test_github_workflow_structure_and_gates():
     wf = _load(ROOT / "github" / "force-remediate.yml")
-    assert wf["on"] == {"repository_dispatch": {"types": ["oplia-drift-remediation"]}}
+    assert wf["on"] == {"repository_dispatch": {"types": ["oplia-drift-remediation", "oplia-ttl-destroy"]}}
     assert wf["permissions"] == {"contents": "read", "id-token": "write"}
     assert wf["concurrency"]["cancel-in-progress"] is False
     apply = wf["jobs"]["apply"]
-    assert apply["environment"] == "oplia-production-remediation"
+    assert "oplia-ttl-destroy" in apply["environment"] and "oplia-production-remediation" in apply["environment"]
     assert apply["needs"] == "plan"
     apply_cmds = " ".join(s.get("run", "") for s in apply["steps"])
     assert "apply -input=false -lock-timeout=5m tfplan" in apply_cmds
@@ -59,7 +59,8 @@ def test_gitlab_pipeline_structure_and_gates():
     assert ci["stages"] == ["validate", "plan", "apply"]
     apply = ci["apply"]
     assert apply["rules"] == [{"when": "manual", "allow_failure": False}]
-    assert apply["environment"]["name"] == "oplia-production-remediation"
+    assert apply["environment"]["name"] == "oplia-production-$OPERATION"
+    assert ci["variables"]["OPERATION"] == "remediate"  # environment name is never empty
     assert apply["resource_group"] == ci["plan"]["resource_group"]
     assert any("apply -input=false -lock-timeout=5m" in line for line in apply["script"])
     assert "AWS_OIDC_TOKEN" in apply["id_tokens"]
@@ -73,3 +74,26 @@ def test_jenkinsfile_gates_and_no_groovy_interpolation_in_sh():
     # sh steps must use single quotes so Groovy never interpolates parameters into shell code
     for m in re.finditer(r"\bsh\s*\(?\s*(['\"]{1,3})", text):
         assert m.group(1).startswith("'"), text[m.start(): m.start() + 80]
+
+
+def test_github_destroy_requires_opt_in_and_matching_payload():
+    wf = _load(ROOT / "github" / "force-remediate.yml")
+    assert "github.event.action == 'oplia-ttl-destroy'" in wf["env"]["OPERATION"]
+    validate = next(s for s in wf["jobs"]["plan"]["steps"] if s.get("id") == "validate")["run"]
+    assert 'ALLOW_DESTROY" != "true"' in validate
+    assert "payload operation does not match event type" in validate
+    plan = next(s for s in wf["jobs"]["plan"]["steps"] if s.get("id") == "plan")["run"]
+    assert "destroy_flag=(-destroy)" in plan
+
+
+def test_gitlab_destroy_requires_opt_in():
+    text = (ROOT / "gitlab" / ".gitlab-ci.yml").read_text()
+    assert 'OPLIA_ALLOW_DESTROY:-}" != "true"' in text
+    assert "$DESTROY_FLAG -out=" in text
+
+
+def test_jenkins_destroy_requires_opt_in():
+    text = (ROOT / "jenkins" / "Jenkinsfile").read_text()
+    assert "choice(name: 'OPERATION', choices: ['remediate', 'destroy']" in text
+    assert "env.OPLIA_ALLOW_DESTROY != 'true'" in text
+    assert "$DESTROY_FLAG -out=tfplan" in text

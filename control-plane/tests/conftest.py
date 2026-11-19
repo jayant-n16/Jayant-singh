@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -45,15 +46,17 @@ def _pg_engine():
 
 
 @pytest.fixture
-def session_factory(tmp_path, _pg_engine) -> sessionmaker[Session]:
+def session_factory(tmp_path, _pg_engine) -> Iterator[sessionmaker[Session]]:
     if _pg_engine is not None:
         with _pg_engine.begin() as conn:
             conn.execute(text("TRUNCATE action_proposals, audit_events, audit_head, control_flags "
                               "RESTART IDENTITY"))
-        return make_session_factory(_pg_engine)
+        yield make_session_factory(_pg_engine)
+        return
     engine = make_engine(f"sqlite:///{tmp_path / 'test.db'}")
     Base.metadata.create_all(engine)
-    return make_session_factory(engine)
+    yield make_session_factory(engine)
+    engine.dispose()
 
 
 @pytest.fixture

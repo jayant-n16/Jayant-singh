@@ -285,6 +285,18 @@ class SafetyGate:
                 raise NotFoundError(proposal_id)
             return _to_proposal(row)
 
+    def find_by_idempotency_key(self, idempotency_key: str) -> Proposal | None:
+        """Look up a proposal by key, applying expiry first so a stale PENDING reads as EXPIRED."""
+        with session_scope(self._sf) as s:
+            row = s.execute(
+                select(ProposalRow).where(ProposalRow.idempotency_key == idempotency_key)
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            self._expire_if_due(s, row)
+            s.flush()
+            return _to_proposal(row)
+
     def list(self, status: ProposalStatus | None = None, limit: int = 100) -> list[Proposal]:
         with session_scope(self._sf) as s:
             q = select(ProposalRow).order_by(ProposalRow.created_at.desc()).limit(min(limit, 500))

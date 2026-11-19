@@ -45,7 +45,7 @@ class GitLabDriver:
 
     def describe(self, req: RemediationRequest) -> str:
         return (
-            f"Trigger GitLab pipeline on {self._project}@{self._ref} "
+            f"Trigger GitLab pipeline on {self._project}@{self._ref} ({req.operation.upper()}) "
             f"for zone={req.zone_name} cloud={req.cloud} account={req.account_id} blueprint={req.blueprint}"
         )
 

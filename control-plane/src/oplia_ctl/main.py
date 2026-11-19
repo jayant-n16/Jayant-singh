@@ -16,7 +16,8 @@ from oplia_ctl.config import Settings, get_settings
 from oplia_ctl.db import Base, make_engine, make_session_factory
 from oplia_ctl.drivers.cicd import build_cicd_driver
 from oplia_ctl.http import ResilientClient
-from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, DriftRemediationExecutor
+from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
+from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
 from oplia_ctl.safety import Executor, SafetyGate
 from oplia_ctl.secrets import build_secret_provider
 from oplia_ctl.soar.exporter import SOARExporter, SOARSettings
@@ -37,10 +38,12 @@ def build(settings: Settings) -> FastAPI:
     )
     secrets = build_secret_provider(settings.secret_provider)
     client = ResilientClient(timeout=settings.http_timeout_seconds, max_retries=settings.http_max_retries)
+    pipeline_dispatch = PipelineDispatchExecutor(
+        lambda name: build_cicd_driver(name, settings.cicd, secrets, client)
+    )
     executors: dict[str, Executor] = {
-        ACTION_DRIFT_REMEDIATE: DriftRemediationExecutor(
-            lambda name: build_cicd_driver(name, settings.cicd, secrets, client)
-        ),
+        ACTION_DRIFT_REMEDIATE: pipeline_dispatch,
+        ACTION_IAC_DESTROY: pipeline_dispatch,
         "isolate.aws": AwsInstanceIsolationExecutor(),
         "isolate.azure": AzureNicIsolationExecutor(),
         "isolate.k8s": K8sNamespaceIsolationExecutor(),

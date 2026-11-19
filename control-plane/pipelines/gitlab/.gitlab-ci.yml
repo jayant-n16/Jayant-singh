@@ -1,11 +1,15 @@
-# OPLIA drift remediation for GitLab CI.
+# OPLIA drift remediation and TTL teardown for GitLab CI.
 #
 # Install in the INFRASTRUCTURE project as .gitlab-ci.yml (or include it). Runs only when
 # the OPLIA control plane fires the pipeline trigger after an approved proposal.
 #
-# Safety: `plan` runs unattended; `apply` is a manual job (protect the
-# `oplia-production-remediation` environment so only approvers can run it), applies only
-# the reviewed plan artifact, and is serialised per zone with a resource_group.
+# OPERATION=remediate (plan) or OPERATION=destroy (plan -destroy), sent by the control plane.
+#
+# Safety: `plan` runs unattended; `apply` is a manual job in the environment
+# `oplia-production-<OPERATION>` (protect both environments so only approvers can run them),
+# applies only the reviewed plan artifact, and is serialised per zone with a resource_group.
+# Destroy also requires the CI/CD variable OPLIA_ALLOW_DESTROY=true; leave it unset in
+# production infrastructure projects so destroy can never run there.
 #
 # Credentials use GitLab OIDC id_tokens (no static cloud keys):
 #   AWS:   CI variable OPLIA_AWS_ROLE_NAME (role in each target account trusting GitLab OIDC),
@@ -23,6 +27,7 @@ variables:
   TF_IN_AUTOMATION: "true"
   TF_INPUT: "false"
   OPLIA_TF_LOCK_TABLE: terraform-state-lock
+  OPERATION: remediate   # overridden by the trigger for TTL teardown
 
 default:
   image:
@@ -45,6 +50,12 @@ stages: [validate, plan, apply]
   case "$ACCOUNT_ID" in *[!A-Za-z0-9_-]*|"") echo "invalid ACCOUNT_ID"; exit 1;; esac
   case "$CLOUD" in aws|azure) ;; *) echo "CLOUD must be aws or azure"; exit 1;; esac
   case "$BLUEPRINT" in control-tower-standard|alz-hybrid) ;; *) echo "blueprint not allowed"; exit 1;; esac
+  case "${OPERATION:-remediate}" in remediate|destroy) ;; *) echo "OPERATION must be remediate or destroy"; exit 1;; esac
+  if [ "${OPERATION:-remediate}" = "destroy" ] && [ "${OPLIA_ALLOW_DESTROY:-}" != "true" ]; then
+    echo "destroy is not enabled for this project (OPLIA_ALLOW_DESTROY != true)"; exit 1
+  fi
+  DESTROY_FLAG=""
+  if [ "${OPERATION:-remediate}" = "destroy" ]; then DESTROY_FLAG="-destroy"; fi
   case "$OPLIA_TF_ROOT" in *..*|"") echo "OPLIA_TF_ROOT not set or invalid"; exit 1;; esac
   TF_ROOT="$OPLIA_TF_ROOT/$BLUEPRINT/$ZONE_NAME"
   [ -d "$TF_ROOT" ] || { echo "Terraform root $TF_ROOT not found"; exit 1; }
@@ -77,7 +88,8 @@ validate:
       set -eu
       case "$ZONE_NAME" in *[!A-Za-z0-9_.-]*|"") echo "invalid ZONE_NAME"; exit 1;; esac
       case "$CORRELATION_ID" in *[!A-Za-z0-9_.:-]*|"") echo "invalid CORRELATION_ID"; exit 1;; esac
-      echo "Remediation $CORRELATION_ID: $CLOUD/$ACCOUNT_ID zone=$ZONE_NAME blueprint=$BLUEPRINT"
+      case "${OPERATION:-remediate}" in remediate|destroy) ;; *) echo "invalid OPERATION"; exit 1;; esac
+      echo "${OPERATION:-remediate} $CORRELATION_ID: $CLOUD/$ACCOUNT_ID zone=$ZONE_NAME blueprint=$BLUEPRINT"
 
 plan:
   stage: plan
@@ -88,11 +100,11 @@ plan:
     - *setup
     - |
       set +e
-      terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode -out="$CI_PROJECT_DIR/tfplan"
+      terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode $DESTROY_FLAG -out="$CI_PROJECT_DIR/tfplan"
       rc=$?
       set -e
       case $rc in
-        0) echo "No drift to remediate."; touch "$CI_PROJECT_DIR/no_changes" ;;
+        0) echo "Nothing to ${OPERATION:-remediate}."; touch "$CI_PROJECT_DIR/no_changes" ;;
         2) terraform -chdir="$TF_ROOT" show -no-color "$CI_PROJECT_DIR/tfplan" | tail -n 400 ;;
         *) echo "terraform plan failed ($rc)"; exit "$rc" ;;
       esac
@@ -108,7 +120,7 @@ apply:
   needs: [plan]
   resource_group: oplia-remediate-$ZONE_NAME
   environment:
-    name: oplia-production-remediation
+    name: oplia-production-$OPERATION
   rules:
     - when: manual
       allow_failure: false

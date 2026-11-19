@@ -17,8 +17,15 @@ _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _BLUEPRINT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
+Operation = Literal["remediate", "destroy"]
+
+
 class RemediationRequest(BaseModel):
-    """A validated drift-remediation request."""
+    """A validated pipeline request: drift remediation (default) or TTL teardown.
+
+    ``operation`` defaults to ``remediate`` so proposals stored before Phase 2
+    (which have no operation field) keep their original meaning.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -27,6 +34,7 @@ class RemediationRequest(BaseModel):
     account_id: str
     blueprint: str
     correlation_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
+    operation: Operation = "remediate"
 
     @field_validator("zone_name")
     @classmethod
@@ -56,6 +64,7 @@ class RemediationRequest(BaseModel):
             "ACCOUNT_ID": self.account_id,
             "BLUEPRINT": self.blueprint,
             "CORRELATION_ID": self.correlation_id,
+            "OPERATION": self.operation,
         }
 
 

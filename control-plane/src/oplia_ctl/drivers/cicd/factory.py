@@ -24,7 +24,9 @@ def build_cicd_driver(
         if not cfg.github_repository:
             raise CICDNotConfiguredError("OPLIA_CICD__GITHUB_REPOSITORY is not set")
         return GitHubDriver(api_url=cfg.github_api_url, repository=cfg.github_repository,
-                            event_type=cfg.github_event_type, token_secret=cfg.github_token_secret,
+                            event_types={"remediate": cfg.github_event_type,
+                                         "destroy": cfg.github_destroy_event_type},
+                            token_secret=cfg.github_token_secret,
                             secrets=secrets, client=client)
     if target_cicd == "gitlab":
         if not cfg.gitlab_project_id:

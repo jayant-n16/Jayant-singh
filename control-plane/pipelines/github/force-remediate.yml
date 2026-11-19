@@ -1,12 +1,18 @@
-# OPLIA drift remediation for GitHub Actions.
+# OPLIA drift remediation and TTL teardown for GitHub Actions.
 #
 # Install in the INFRASTRUCTURE repository (Control Tower Standard / ALZ Hybrid) as
 # .github/workflows/force-remediate.yml. Triggered only by the OPLIA control plane via
 # repository_dispatch, after an approver has approved the remediation proposal.
 #
-# Safety: `plan` runs unattended; `apply` runs ONLY the reviewed plan file and waits on the
-# protected environment `oplia-production-remediation` (configure required reviewers in
-# Settings -> Environments). Applying a saved plan never prompts, which is the safe
+# Operations (chosen by the dispatch event type, cross-checked against the payload):
+#   oplia-drift-remediation -> OPERATION=remediate : plan + apply to restore the baseline
+#   oplia-ttl-destroy       -> OPERATION=destroy   : plan -destroy + apply to tear down an expired stack
+#
+# Safety: `plan` runs unattended; `apply` runs ONLY the reviewed plan file and waits on a
+# protected environment with required reviewers (Settings -> Environments):
+#   oplia-production-remediation (remediate)  and  oplia-ttl-destroy (destroy).
+# Destroy additionally requires the repository variable OPLIA_ALLOW_DESTROY=true; leave it
+# unset in production infrastructure repositories so destroy can never run there. Applying a saved plan never prompts, which is the safe
 # equivalent of `-auto-approve`: it cannot apply anything other than what was reviewed,
 # and Terraform refuses a stale plan if state changed in between.
 #
@@ -21,11 +27,11 @@
 # Each Terraform root must declare an empty backend block: `backend "s3" {}` or `backend "azurerm" {}`.
 
 name: OPLIA force remediate
-run-name: "OPLIA remediation ${{ github.event.client_payload.correlation_id }}"
+run-name: "OPLIA ${{ github.event.action }} ${{ github.event.client_payload.correlation_id }}"
 
 on:
   repository_dispatch:
-    types: [oplia-drift-remediation]
+    types: [oplia-drift-remediation, oplia-ttl-destroy]
 
 permissions:
   contents: read
@@ -44,6 +50,9 @@ env:
   ACCOUNT_ID: ${{ github.event.client_payload.account_id }}
   BLUEPRINT: ${{ github.event.client_payload.blueprint }}
   CORRELATION_ID: ${{ github.event.client_payload.correlation_id }}
+  PAYLOAD_OPERATION: ${{ github.event.client_payload.operation }}
+  OPERATION: ${{ github.event.action == 'oplia-ttl-destroy' && 'destroy' || 'remediate' }}
+  ALLOW_DESTROY: ${{ vars.OPLIA_ALLOW_DESTROY }}
   TF_ROOT_BASE: ${{ vars.OPLIA_TF_ROOT }}
 
 jobs:
@@ -53,6 +62,7 @@ jobs:
     outputs:
       changes: ${{ steps.plan.outputs.changes }}
       cloud: ${{ steps.validate.outputs.cloud }}
+      operation: ${{ steps.validate.outputs.operation }}
     steps:
       - name: Validate payload
         id: validate
@@ -66,7 +76,13 @@ jobs:
           [[ "$CORRELATION_ID" =~ ^[A-Za-z0-9_.:-]{1,64}$ ]] || { echo "::error::invalid correlation_id"; exit 1; }
           [[ "$TF_ROOT_BASE" =~ ^[A-Za-z0-9_./-]+$ && "$TF_ROOT_BASE" != *..* ]] || { echo "::error::OPLIA_TF_ROOT not set or invalid"; exit 1; }
           if [[ "$CLOUD" == "aws" && ! "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then echo "::error::AWS account_id must be 12 digits"; exit 1; fi
+          # The event type decides the operation; a payload that disagrees is refused.
+          [[ "${PAYLOAD_OPERATION:-remediate}" == "$OPERATION" ]] || { echo "::error::payload operation does not match event type"; exit 1; }
+          if [[ "$OPERATION" == "destroy" && "$ALLOW_DESTROY" != "true" ]]; then
+            echo "::error::destroy is not enabled for this repository (OPLIA_ALLOW_DESTROY != true)"; exit 1
+          fi
           echo "cloud=$CLOUD" >> "$GITHUB_OUTPUT"
+          echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -139,12 +155,14 @@ jobs:
           ARM_SUBSCRIPTION_ID: ${{ vars.OPLIA_AZURE_SUBSCRIPTION_ID }}
         run: |
           set -uo pipefail
-          terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode -out=tfplan
+          destroy_flag=()
+          if [[ "$OPERATION" == "destroy" ]]; then destroy_flag=(-destroy); fi
+          terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode "${destroy_flag[@]}" -out=tfplan
           rc=$?
           case $rc in
-            0) echo "changes=false" >> "$GITHUB_OUTPUT"; echo "No drift to remediate." >> "$GITHUB_STEP_SUMMARY" ;;
+            0) echo "changes=false" >> "$GITHUB_OUTPUT"; echo "Nothing to $OPERATION." >> "$GITHUB_STEP_SUMMARY" ;;
             2) echo "changes=true" >> "$GITHUB_OUTPUT"
-               { echo "### Remediation plan ($CORRELATION_ID)"; echo '```'; terraform -chdir="$TF_ROOT" show -no-color tfplan | tail -n 400; echo '```'; } >> "$GITHUB_STEP_SUMMARY" ;;
+               { echo "### ${OPERATION^^} plan ($CORRELATION_ID)"; echo '```'; terraform -chdir="$TF_ROOT" show -no-color tfplan | tail -n 400; echo '```'; } >> "$GITHUB_STEP_SUMMARY" ;;
             *) echo "::error::terraform plan failed ($rc)"; exit "$rc" ;;
           esac
 
@@ -162,7 +180,7 @@ jobs:
     if: needs.plan.outputs.changes == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    environment: oplia-production-remediation
+    environment: ${{ needs.plan.outputs.operation == 'destroy' && 'oplia-ttl-destroy' || 'oplia-production-remediation' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:

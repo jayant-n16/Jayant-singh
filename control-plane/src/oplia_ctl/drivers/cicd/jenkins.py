@@ -53,7 +53,7 @@ class JenkinsDriver:
 
     def describe(self, req: RemediationRequest) -> str:
         return (
-            f"Jenkins buildWithParameters on job '{self._job}' "
+            f"Jenkins buildWithParameters on job '{self._job}' ({req.operation.upper()}) "
             f"for zone={req.zone_name} cloud={req.cloud} account={req.account_id} blueprint={req.blueprint}"
         )
 

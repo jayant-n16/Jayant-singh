@@ -63,7 +63,9 @@ def propose_drift_remediation(
     )
 
 
-class DriftRemediationExecutor:
+class PipelineDispatchExecutor:
+    """Dispatches a validated RemediationRequest (remediate or destroy) to a CI/CD driver."""
+
     def __init__(self, driver_for: Callable[[str], CICDDriver]) -> None:
         self._driver_for = driver_for
 
@@ -78,3 +80,7 @@ class DriftRemediationExecutor:
         driver, req = self._parse(payload)
         res = driver.trigger(req)
         return {"system": res.system, "accepted": res.accepted, "reference": res.reference, **res.detail}
+
+
+# Backwards-compatible name used by Phase 1 wiring.
+DriftRemediationExecutor = PipelineDispatchExecutor

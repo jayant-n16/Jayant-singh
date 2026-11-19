@@ -1,4 +1,4 @@
-// OPLIA drift remediation for Jenkins (declarative pipeline).
+// OPLIA drift remediation and TTL teardown for Jenkins (declarative pipeline).
 //
 // Create a "Pipeline from SCM" job pointing at the INFRASTRUCTURE repository and branch,
 // using this Jenkinsfile. The OPLIA control plane calls buildWithParameters after an
@@ -7,6 +7,8 @@
 // Safety: plan runs unattended; apply waits at an `input` step that only members of
 // OPLIA_APPROVERS may submit, applies only the reviewed plan file, and concurrent builds
 // are disabled so two remediations can never touch the same state at once.
+// OPERATION=destroy runs `plan -destroy` and additionally requires the job environment
+// variable OPLIA_ALLOW_DESTROY=true; leave it unset for production infrastructure jobs.
 //
 // Requires plugins: Pipeline, Docker Pipeline, Credentials Binding, AWS Credentials,
 // Azure Credentials. Credentials (Manage Jenkins -> Credentials):
@@ -37,6 +39,7 @@ pipeline {
     string(name: 'ACCOUNT_ID', defaultValue: '', description: 'AWS account id or Azure subscription alias')
     choice(name: 'BLUEPRINT', choices: ['control-tower-standard', 'alz-hybrid'], description: 'Baseline blueprint')
     string(name: 'CORRELATION_ID', defaultValue: '', description: 'OPLIA proposal correlation id')
+    choice(name: 'OPERATION', choices: ['remediate', 'destroy'], description: 'remediate drift or destroy an expired stack')
   }
 
   environment {
@@ -54,6 +57,11 @@ pipeline {
           if (!(params.CORRELATION_ID ==~ /^[A-Za-z0-9_.:-]{1,64}$/)) { error('invalid CORRELATION_ID') }
           if (!env.OPLIA_TF_ROOT || env.OPLIA_TF_ROOT.contains('..')) { error('OPLIA_TF_ROOT not set or invalid') }
           if (!env.OPLIA_APPROVERS) { error('OPLIA_APPROVERS must be set') }
+          if (!(params.OPERATION in ['remediate', 'destroy'])) { error('invalid OPERATION') }
+          if (params.OPERATION == 'destroy' && env.OPLIA_ALLOW_DESTROY != 'true') {
+            error('destroy is not enabled for this job (OPLIA_ALLOW_DESTROY != true)')
+          }
+          env.DESTROY_FLAG = params.OPERATION == 'destroy' ? '-destroy' : ''
           env.TF_ROOT = "${env.OPLIA_TF_ROOT}/${params.BLUEPRINT}/${params.ZONE_NAME}"
           env.TF_KEY = "${params.BLUEPRINT}/${params.ZONE_NAME}/${params.ACCOUNT_ID}.tfstate"
           currentBuild.displayName = "#${env.BUILD_NUMBER} ${params.CORRELATION_ID}"
@@ -82,10 +90,10 @@ pipeline {
               fi
             '''
             int rc = sh(returnStatus: true,
-                        script: 'terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode -out=tfplan')
+                        script: 'terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode $DESTROY_FLAG -out=tfplan')
             if (rc == 0) {
               env.TF_CHANGES = 'false'
-              echo 'No drift to remediate.'
+              echo "Nothing to ${params.OPERATION}."
             } else if (rc == 2) {
               env.TF_CHANGES = 'true'
               sh 'terraform -chdir="$TF_ROOT" show -no-color tfplan | tail -n 400'
@@ -101,7 +109,7 @@ pipeline {
       when { expression { env.TF_CHANGES == 'true' } }
       steps {
         timeout(time: 60, unit: 'MINUTES') {
-          input(message: "Apply OPLIA remediation ${params.CORRELATION_ID} to ${params.ZONE_NAME}?",
+          input(message: "Apply OPLIA ${params.OPERATION.toUpperCase()} ${params.CORRELATION_ID} to ${params.ZONE_NAME}?",
                 ok: 'Apply reviewed plan', submitter: env.OPLIA_APPROVERS)
         }
       }

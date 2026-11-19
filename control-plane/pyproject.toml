@@ -20,6 +20,7 @@ dependencies = [
   "boto3>=1.34",
   "azure-identity>=1.16",
   "azure-mgmt-network>=25.3",
+  "azure-mgmt-resource>=23.0",
   "kubernetes>=29.0",
 ]
 
@@ -38,6 +39,7 @@ dev = [
 
 [project.scripts]
 oplia-soar-exporter = "oplia_ctl.soar.exporter:main"
+oplia-iac-lifecycle = "oplia_ctl.lifecycle.manager:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

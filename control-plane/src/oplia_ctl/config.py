@@ -32,6 +32,7 @@ class CICDTarget(BaseModel):
     github_api_url: str = "https://api.github.com"
     github_repository: str = ""  # "owner/repo" of the infrastructure repository
     github_event_type: str = "oplia-drift-remediation"
+    github_destroy_event_type: str = "oplia-ttl-destroy"
     github_token_secret: str = "github_dispatch_token"
 
     # GitLab
