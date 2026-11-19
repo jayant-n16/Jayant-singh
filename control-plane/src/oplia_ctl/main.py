@@ -8,7 +8,8 @@ from datetime import timedelta
 from fastapi import FastAPI
 
 import oplia_ctl.aiops.models
-import oplia_ctl.finops.models  # noqa: F401  (registers the compliance log tables)
+import oplia_ctl.finops.models
+import oplia_ctl.identity.models  # noqa: F401  (registers the JIT table)
 from oplia_ctl.aiops.config import AIOpsSettings, build_notifier, build_scheduler
 from oplia_ctl.aiops.engine import AIOpsEngine
 from oplia_ctl.aiops.escalation import EscalationScheduler
@@ -34,6 +35,9 @@ from oplia_ctl.drivers.cicd import build_cicd_driver
 from oplia_ctl.finops.config import FinOpsSettings, build_executors
 from oplia_ctl.finops.optimizer import WindowGuard
 from oplia_ctl.http import ResilientClient
+from oplia_ctl.identity.config import IdentitySettings, build_providers
+from oplia_ctl.identity.jit import JitService, load_catalog
+from oplia_ctl.identity.sweep import ACTION_DISABLE_INACTIVE, DisableInactiveExecutor
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
 from oplia_ctl.safety import Executor, SafetyGate
@@ -66,6 +70,15 @@ def build(settings: Settings) -> FastAPI:
         "isolate.azure": AzureNicIsolationExecutor(),
         "isolate.k8s": K8sNamespaceIsolationExecutor(),
     }
+    identity_cfg = IdentitySettings()
+    jit: JitService | None = None
+    providers = build_providers(identity_cfg, secrets, client)
+    if providers:
+        executors[ACTION_DISABLE_INACTIVE] = DisableInactiveExecutor(
+            providers, inactive_days=identity_cfg.inactive_days)
+    if identity_cfg.catalog_path:
+        jit = JitService(gate=gate, session_factory=make_session_factory(engine), providers=providers,
+                         catalog=load_catalog(identity_cfg.catalog_path, providers))
     finops_cfg = FinOpsSettings()
     executors.update(build_executors(finops_cfg, WindowGuard(finops_cfg.maintenance_windows)))
     aiops_cfg = AIOpsSettings()
@@ -116,6 +129,7 @@ def build(settings: Settings) -> FastAPI:
         escalation=escalation,
         alertmanager_token_secret=aiops_cfg.alertmanager_token_secret,
         finops_sf=make_session_factory(engine),
+        jit=jit,
         db_ping=sqlalchemy_ping(engine),
     )
 

@@ -19,6 +19,13 @@ POST /aiops/predictions/{id}/cancel   operator/approver: withdraw a scheduled pr
 GET  /finops/findings                 tag-compliance log (operator/approver; ?status=OPEN&cloud=aws)
 GET  /finops/scans                    recent compliance scans (operator/approver)
 GET  /finops/candidates               idle resources tracked for clean-up (operator/approver)
+GET  /jit/roles                       JIT role catalog (operator/approver)
+POST /jit/requests                    operator/approver: request time-bound elevated access
+GET  /jit/requests[/{id}]             operator/approver
+POST /jit/requests/{id}/approve       approver (not the requester): approve and grant now
+POST /jit/requests/{id}/reject        approver
+POST /jit/requests/{id}/grant         approver: retry the grant of an approved request
+POST /jit/requests/{id}/revoke        approver or the requester: revoke before expiry
 POST /kill-switch                     approver: engage/release
 GET  /audit/verify                    approver: verify the audit hash chain
 """
@@ -42,6 +49,7 @@ from oplia_ctl.aiops.models import PredictionStatus
 from oplia_ctl.auth import AuthError, OIDCVerifier, Principal, verify_webhook
 from oplia_ctl.finops.compliance import list_findings, list_scans
 from oplia_ctl.finops.optimizer import MaintenanceWindowClosedError, list_candidates
+from oplia_ctl.identity.jit import JitConflictError, JitRequestError, JitService
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
 from oplia_ctl.safety import (
     Executor,
@@ -59,6 +67,15 @@ from oplia_ctl.secrets import SecretNotFoundError, SecretProvider
 from oplia_ctl.soar.exporter import SOARExporter
 
 MAX_WEBHOOK_BYTES = 256 * 1024
+
+
+class JitRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    user_id: str = Field(min_length=1, max_length=128)
+    requested_role: str = Field(min_length=1, max_length=64)
+    target_cloud_account: str = Field(min_length=1, max_length=128)
+    expiration_minutes: int = Field(ge=1, le=1440)
+    justification: str = Field(min_length=10, max_length=1000)
 
 
 class DecisionBody(BaseModel):
@@ -107,6 +124,7 @@ def create_app(
     escalation: EscalationScheduler | None = None,
     alertmanager_token_secret: str = "alertmanager_webhook_token",  # noqa: S107 - a secret NAME
     finops_sf: sessionmaker[Session] | None = None,
+    jit: JitService | None = None,
     db_ping: Callable[[], None] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
@@ -371,6 +389,76 @@ def create_app(
     @app.get("/finops/candidates")
     def finops_candidates(_: Annotated[Principal, Depends(reader)], limit: int = 200) -> list[dict[str, Any]]:
         return list_candidates(_finops(), limit)
+
+    # ------------------------------------------------------------------ JIT
+    def _jit() -> JitService:
+        if jit is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "JIT access not configured")
+        return jit
+
+    def _jit_call(fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except (LookupError, NotFoundError):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "JIT request not found") from None
+        except JitConflictError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+        except (InvalidTransitionError, NotApprovedError, ExpiredError) as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, f"{type(exc).__name__}: {exc}") from None
+        except FourEyesViolationError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
+        except KillSwitchEngagedError as exc:
+            raise HTTPException(status.HTTP_423_LOCKED, f"{exc}; retry with POST /jit/requests/{{id}}/grant") from None
+        except (JitRequestError, ValueError) as exc:
+            raise HTTPException(422, str(exc)) from None
+
+    @app.get("/jit/roles")
+    def jit_roles(_: Annotated[Principal, Depends(reader)]) -> list[dict[str, Any]]:
+        return [r.model_dump() for r in _jit().catalog.values()]
+
+    @app.post("/jit/requests", status_code=status.HTTP_201_CREATED)
+    def jit_request(body: JitRequestBody, p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        svc = _jit()
+        return _jit_call(lambda: svc.request(requester=p.subject, **body.model_dump()))  # type: ignore[no-any-return]
+
+    @app.get("/jit/requests")
+    def jit_list(_: Annotated[Principal, Depends(reader)], approval_status: str | None = None,
+                 access_status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if approval_status not in (None, "PENDING", "APPROVED", "REJECTED", "EXPIRED"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown approval_status")
+        if access_status not in (None, "NONE", "ACTIVE", "REVOKED", "DRY_RUN", "GRANT_FAILED"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown access_status")
+        return _jit().list_requests(approval_status=approval_status, access_status=access_status, limit=limit)
+
+    @app.get("/jit/requests/{request_id}")
+    def jit_get(request_id: str, _: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        svc = _jit()
+        return _jit_call(lambda: svc.get(request_id))  # type: ignore[no-any-return]
+
+    @app.post("/jit/requests/{request_id}/approve")
+    def jit_approve(request_id: str, body: DecisionBody,
+                    p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        svc = _jit()
+        return _jit_call(lambda: svc.approve(request_id, p.subject, body.note))  # type: ignore[no-any-return]
+
+    @app.post("/jit/requests/{request_id}/reject")
+    def jit_reject(request_id: str, body: DecisionBody,
+                   p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        svc = _jit()
+        return _jit_call(lambda: svc.reject(request_id, p.subject, body.note))  # type: ignore[no-any-return]
+
+    @app.post("/jit/requests/{request_id}/grant")
+    def jit_grant(request_id: str, p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        svc = _jit()
+        return _jit_call(lambda: svc.execute_approved(request_id, p.subject))  # type: ignore[no-any-return]
+
+    @app.post("/jit/requests/{request_id}/revoke")
+    def jit_revoke(request_id: str, p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        svc = _jit()
+        current = _jit_call(lambda: svc.get(request_id))
+        if not p.has_role(approver_role) and p.subject != current["requested_by"]:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "only an approver or the requester can revoke")
+        return _jit_call(lambda: svc.revoke_now(request_id, p.subject))  # type: ignore[no-any-return]
 
     # ---------------------------------------------------------- governance
     @app.post("/kill-switch")

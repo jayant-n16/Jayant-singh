@@ -198,6 +198,14 @@ class SafetyGate:
         )
         head.last_hash = digest
 
+    def record_event(self, *, actor: str, event: str, detail: dict[str, Any],
+                     proposal_id: str | None = None) -> None:
+        """Append an event to the hash-chained audit log (for actions outside a proposal, e.g. JIT revocation)."""
+        if not event or len(event) > 64:
+            raise ValueError("event must be 1..64 characters")
+        with session_scope(self._sf) as s:
+            self._audit(s, actor=actor, event=event, proposal_id=proposal_id, detail=detail)
+
     def verify_audit_chain(self) -> bool:
         with session_scope(self._sf) as s:
             prev = GENESIS_HASH
@@ -291,6 +299,8 @@ class SafetyGate:
             row = s.get(ProposalRow, proposal_id)
             if row is None:
                 raise NotFoundError(proposal_id)
+            if self._expire_if_due(s, row):  # reads always show the true state
+                s.flush()
             return _to_proposal(row)
 
     def find_by_idempotency_key(self, idempotency_key: str) -> Proposal | None:
@@ -327,7 +337,11 @@ class SafetyGate:
             q = select(ProposalRow).order_by(ProposalRow.created_at.desc()).limit(min(limit, 500))
             if status is not None:
                 q = q.where(ProposalRow.status == status.value)
-            return [_to_proposal(r) for r in s.execute(q).scalars()]
+            rows = list(s.execute(q).scalars())
+            expired = [self._expire_if_due(s, r) for r in rows]  # every row, no short-circuit
+            if any(expired):
+                s.flush()
+            return [_to_proposal(r) for r in rows if status is None or r.status == status.value]
 
     def _expire_if_due(self, s: Session, row: ProposalRow) -> bool:
         expires = _req_utc(row.expires_at)

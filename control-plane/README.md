@@ -164,6 +164,40 @@ identities or data passes through one safety gate.
   completed**, and never touch resources tagged `OpliaRetain` or with a protected `Environment`.
   API: `GET /finops/candidates`. Example settings: `examples/finops/finops.env.example`.
 
+## Phase 5 components – just-in-time privileged access (Entra ID, Okta, Active Directory)
+
+* **Schema** – `jit_access_requests` with the document's fields (`user_id`, `requested_role`,
+  `target_cloud_account`, `expiration_minutes`, `approval_status`) plus grant/revoke state.
+* **Role catalog** (`OPLIA_IDENTITY_CATALOG_PATH`, example `examples/identity/jit-roles.example.json`):
+  each role maps to one Entra group or directory role (`role:<roleDefinitionId>`), one Okta group or
+  admin role (`role:SUPER_ADMIN`…), or one AD group DN, with allowed accounts and a maximum duration.
+  Requesters can only ask for catalog roles; one open request or active grant per user and group.
+* **Flow** – `POST /jit/requests` → safety-gate proposal → `POST /jit/requests/{id}/approve` by an
+  approver who is **not the requester** → membership added and verified → `expires_at` set.
+  Dry-run and the kill switch apply to grants. A grant whose membership cannot be verified is undone.
+* **Worker** – `oplia-jit-worker` runs every 60 s: removes expired memberships, verifies they are
+  gone, writes `jit_revoked` to the hash-chained audit log. Revocation bypasses approval and the kill
+  switch (it only reduces privilege); failures are retried every tick and alert PagerDuty/Slack after
+  3 attempts. Every 15 min it reports members of catalog groups **without** an active grant
+  (standing access); `OPLIA_IDENTITY_REMOVE_STANDING_MEMBERS=true` removes them (break-glass accounts
+  go in `OPLIA_IDENTITY_STANDING_ALLOWLIST`).
+* **Drivers**
+  * Entra ID – Microsoft Graph v1.0 over HTTPS (client credentials): `members/$ref`, role
+    assignments, `checkMemberGroups` for verification (transitive), `accountEnabled=false`.
+  * Okta – Users/Groups/Roles API (`SSWS` token), `lifecycle/suspend` (reversible).
+  * Active Directory – **python-ldap**, LDAPS or StartTLS only with certificate verification,
+    `MOD_ADD`/`MOD_DELETE` on `member`, transitive check (`LDAP_MATCHING_RULE_IN_CHAIN`), range
+    retrieval for large groups, paged searches, `ACCOUNTDISABLE` bit.
+  Tokens are only ever sent to the provider's own host (pagination links to other hosts are refused).
+* **90-day sweep** – `oplia-identity-sweep` (daily): enabled accounts whose latest sign-in (or
+  creation, if never) is older than 90 days → one `identity.disable_inactive` proposal per directory.
+  Exempt accounts are skipped; Entra users synchronised from AD are reported but not disabled in
+  Entra (disable them in AD); more than `OPLIA_IDENTITY_SWEEP_MAX_PER_RUN` (25) in one directory trips
+  a circuit breaker (nothing proposed, alert sent). Each account is re-checked when executed (anyone
+  who signed in meanwhile is skipped). With approval switched off the sweep disables immediately.
+* Settings: `examples/identity/identity.env.example`. Secrets: `entra_client_secret`,
+  `okta_api_token`, `ad_bind_password`.
+
 ## API
 
 | Method | Path | Auth |
@@ -179,6 +213,9 @@ identities or data passes through one safety gate.
 | POST | `/webhooks/aiops/alertmanager` | bearer token (`alertmanager_webhook_token`) |
 | GET | `/aiops/predictions` | OIDC: operator or approver |
 | GET | `/finops/findings`, `/finops/scans`, `/finops/candidates` | OIDC: operator or approver |
+| GET/POST | `/jit/roles`, `/jit/requests` | OIDC: operator or approver |
+| POST | `/jit/requests/{id}/approve`, `/reject`, `/grant` | OIDC: approver (not the requester) |
+| POST | `/jit/requests/{id}/revoke` | OIDC: approver or the requester |
 | POST | `/aiops/predictions/{id}/cancel` | OIDC: operator or approver |
 
 ## Configuration
@@ -199,7 +236,7 @@ secrets: webhook_hmac_secret, github_dispatch_token, gitlab_trigger_token,
 ## Run and test
 
 ```bash
-pip install -e ".[dev,postgres,gcp]"
+pip install -e ".[dev,postgres,gcp,ad]"   # ad needs libldap/libsasl2 headers
 ruff check src tests migrations && mypy && bandit -r src -q
 pytest                                                     # SQLite
 OPLIA_TEST_DATABASE_URL=postgresql+psycopg://... pytest    # PostgreSQL, schema built by migrations
@@ -210,6 +247,8 @@ oplia-iac-lifecycle                                        # TTL scan (CronJob)
 oplia-aiops-escalator [--once]                             # predictive escalation
 oplia-finops-scan [--audit]                                # tag compliance (CronJob)
 oplia-finops-optimize observe|window                       # idle clean-up (CronJobs)
+oplia-jit-worker [--once]                                  # JIT revocation every 60 s
+oplia-identity-sweep                                       # 90-day inactive accounts (CronJob)
 ```
 
 ## What is and is not verified
@@ -231,6 +270,13 @@ shapes); Azure and GCP against fakes (the Azure snapshot body was checked with t
 serializer); IBM against HTTP mocks of the documented Global Search API. The default IBM queries
 (e.g. `service_name:databases-for-*`) must be checked against your account (`"fields": ["*"]`).
 Cost figures are not calculated: candidates show size only.
+
+**Phase 5 not yet verified live**: the AD driver ran against a **real OpenLDAP server** over LDAPS
+(grant, verify, revoke, idempotency, paged search, bad password, untrusted certificate) but not
+against Active Directory itself - the AD-only parts (transitive membership rule, range retrieval,
+`userAccountControl`, `lastLogonTimestamp`) are tested with a fake connection. Entra ID and Okta
+were tested with HTTP mocks of the documented endpoints. Entra `signInActivity` needs an Entra ID
+P1/P2 licence and `AuditLog.Read.All`.
 
 **Not yet verified against live systems**: real GitHub/GitLab/Jenkins instances, a real SIEM,
 real AWS/Azure accounts, a real Kubernetes/OpenShift cluster, and the pipeline templates

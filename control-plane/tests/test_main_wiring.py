@@ -92,3 +92,27 @@ def test_build_registers_finops(tmp_path, monkeypatch):
     assert cfg.policy.allowed_environments == ["dev", "stg", "prod"]
     app = build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'f.db'}", **OIDC))
     assert TestClient(app).get("/finops/findings").status_code == 401  # route exists, auth enforced
+
+
+def test_build_with_identity_providers_and_catalog(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[1] / "examples" / "identity" / "jit-roles.example.json"
+    monkeypatch.setenv("OPLIA_IDENTITY_ENTRA_TENANT_ID", "11111111-1111-1111-1111-111111111111")
+    monkeypatch.setenv("OPLIA_IDENTITY_ENTRA_CLIENT_ID", "22222222-2222-2222-2222-222222222222")
+    monkeypatch.setenv("OPLIA_IDENTITY_OKTA_ORG_URL", "https://acme.okta.com")
+    monkeypatch.setenv("OPLIA_IDENTITY_AD_URL", "ldaps://dc1.corp.example.com")
+    monkeypatch.setenv("OPLIA_IDENTITY_AD_BIND_DN", "CN=svc-oplia,OU=Service Accounts,DC=corp,DC=example,DC=com")
+    monkeypatch.setenv("OPLIA_IDENTITY_AD_BASE_DN", "DC=corp,DC=example,DC=com")
+    monkeypatch.setenv("OPLIA_IDENTITY_CATALOG_PATH", str(example))
+    app = build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'i.db'}", **OIDC))
+    assert TestClient(app).get("/jit/roles").status_code == 401  # route exists and is protected
+
+
+def test_build_identity_catalog_with_missing_provider_fails(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[1] / "examples" / "identity" / "jit-roles.example.json"
+    monkeypatch.setenv("OPLIA_IDENTITY_CATALOG_PATH", str(example))
+    with pytest.raises(ValueError, match="not configured"):
+        build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'j.db'}", **OIDC))

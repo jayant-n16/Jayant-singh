@@ -245,7 +245,8 @@ class ObserveReport:
 
 
 def _aware(dt: datetime) -> datetime:
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    # SQLite returns naive UTC, PostgreSQL returns the session time zone: always report UTC
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 class CostOptimizer:

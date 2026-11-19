@@ -157,3 +157,14 @@ def test_audit_chain_verifies_and_detects_tampering(gate, executor, session_fact
 def test_ttl_is_applied(gate, clock):
     p = _propose(gate)
     assert p.expires_at - p.created_at == timedelta(minutes=60)
+
+
+def test_reads_show_expiry_for_every_lapsed_proposal(gate, clock):
+    ids = [gate.propose(action_type="x", target=f"t{i}", payload={}, reason="r", requested_by="bot").id
+           for i in range(3)]
+    gate.approve(ids[1], "alice")
+    clock.advance(minutes=61)
+    assert gate.list(ProposalStatus.PENDING) == []          # lapsed proposals are not shown as pending
+    assert {p.status for p in gate.list()} == {ProposalStatus.EXPIRED}  # all three, approved one included
+    assert gate.get(ids[0]).status is ProposalStatus.EXPIRED
+    assert gate.verify_audit_chain()

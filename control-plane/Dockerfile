@@ -4,11 +4,19 @@ FROM registry.access.redhat.com/ubi9/python-312 AS build
 WORKDIR /opt/app-root/src
 COPY --chown=1001:0 pyproject.toml README.md ./
 COPY --chown=1001:0 src ./src
+# python-ldap (Active Directory driver) is a C extension without wheels: build it against OpenLDAP
+USER 0
+RUN dnf install -y --setopt=install_weak_deps=0 openldap-devel cyrus-sasl-devel && dnf clean all
+USER 1001
 RUN pip install --no-cache-dir --upgrade pip \
- && pip wheel --no-cache-dir --wheel-dir /tmp/wheels ".[postgres,gcp]"
+ && pip wheel --no-cache-dir --wheel-dir /tmp/wheels ".[postgres,gcp,ad]"
 
 FROM registry.access.redhat.com/ubi9/python-312
 WORKDIR /opt/app-root/src
+# runtime libraries for python-ldap
+USER 0
+RUN dnf install -y --setopt=install_weak_deps=0 openldap cyrus-sasl-lib && dnf clean all
+USER 1001
 COPY --from=build --chown=1001:0 /tmp/wheels /tmp/wheels
 RUN pip install --no-cache-dir --no-index /tmp/wheels/*.whl && rm -rf /tmp/wheels
 COPY --chown=1001:0 alembic.ini ./
