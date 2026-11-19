@@ -34,7 +34,9 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
 
 def _text(value: Any) -> str:
     """psycopg returns bytes for text columns of SQL_ASCII databases."""
-    return value.decode("utf-8", "replace") if isinstance(value, (bytes, bytearray, memoryview)) else str(value)
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", "replace")  # memoryview has no .decode()
+    return str(value)
 
 
 def _ident(name: str) -> str:

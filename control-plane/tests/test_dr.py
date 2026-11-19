@@ -511,3 +511,10 @@ def test_api_dr_endpoints(gate, session_factory, tmp_path):
     assert rs.status_code == 200 and rs.json()["unlocked"]["dr-aws"]["ok"] is True
     assert c.post("/dr/breakers/orders-pg/reset", json={"decision": "release", "note": "again"},
                   headers=ap).status_code == 409
+
+
+def test_text_helper_handles_all_binary_types():
+    from oplia_ctl.dr.lockers import _text
+
+    samples = [b"orders", bytearray(b"orders"), memoryview(b"orders"), "orders"]
+    assert {_text(v) for v in samples} == {"orders"}
