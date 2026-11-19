@@ -39,7 +39,7 @@ Telemetry per pod:
   annotation against the Dynatrace Operator source; the Datadog and OTel image tags exist.
 * The `db.env` template was rendered by a real agent (OpenBao 2.5.3 `bao agent`, AppRole login) and
   the rendered credentials logged in to PostgreSQL 16.
-* **Not validated**: the OTel collector configuration was not loaded by a collector binary (the
-  release checksum could not be verified in the authoring environment, so the binary was not run);
-  run `otelcol validate --config=...` with the pinned version before rollout. The manifests were not
-  applied to a cluster, and the image names `registry.example.com/shop/...` are placeholders.
+* The OTel collector configuration is loaded by the pinned collector image in CI
+  (`otel/opentelemetry-collector:0.163.2 validate`).
+* **Not validated**: the manifests were not applied to a cluster, and the image names
+  `registry.example.com/shop/...` are placeholders.
