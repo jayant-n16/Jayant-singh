@@ -60,11 +60,17 @@ tables without a primary key or above `OPLIA_CONSISTENCY_CHECKSUM_MAX_ROWS` are 
 the report says so) and replication lag. A table that differs is re-checked once after
 `OPLIA_CONSISTENCY_RECHECK_DELAY_SECONDS` (the source keeps changing). If the DR breaker is OPEN the report
 says differences are expected and no proposal is raised. Otherwise data/schema drift raises a `dr.resync`
-proposal: PostgreSQL->PostgreSQL and MySQL->MySQL only; it refuses a read-only (locked) target and any
-schema difference, pauses replication into the copy, replaces each drifted table in one transaction and
-verifies the checksum before reporting success. Results: `GET /databases/consistency`, audit event
+proposal for same-engine pairs (PostgreSQL, MySQL, CockroachDB, MongoDB; PostgreSQL<->CockroachDB is
+refused): it refuses a read-only (locked) target and any schema difference, pauses replication into the
+copy (PostgreSQL subscriptions, MySQL SQL thread, CockroachDB `LOGICAL REPLICATION` jobs, and any Kafka Connect
+sink connectors listed in the target's `pause_connectors`), replaces each drifted table in one transaction
+(CockroachDB: refused above `OPLIA_CONSISTENCY_CHECKSUM_MAX_ROWS`) and verifies the checksum before reporting
+success. MongoDB collections are copied into a temporary collection with the source's indexes, verified, and
+swapped in with `renameCollection` (`dropTarget`); the target must be a writable primary. Results: `GET /databases/consistency`, audit event
 `dr_consistency_check`, console **Databases -> DR consistency**. Tested against real PostgreSQL 16 and MySQL 8
-(drift, recheck, resync, locked target, schema drift); MongoDB with a fake driver.
+(drift, recheck, resync, locked target, schema drift); resync also against real MongoDB 7.0 and
+CockroachDB 24.3 containers in CI (drift, resync, indexes, read-only target, size limit); pausing CockroachDB
+logical replication jobs is not exercised (no LDR job runs in the single-node test cluster).
 
 ## Try it locally with a login (development only)
 

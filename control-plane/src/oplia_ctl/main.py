@@ -178,7 +178,7 @@ def build(settings: Settings) -> FastAPI:
                 return {"stream": b.stream, "state": state, "incident_id": incident, "pending_decision": decision}
         consistency = ConsistencyChecker(db_registry, gate, make_session_factory(engine),
                                          breaker_state=breaker_state)
-        executors[ACTION_DR_RESYNC] = ResyncExecutor(db_registry)
+        executors[ACTION_DR_RESYNC] = ResyncExecutor(db_registry, kafka_connect=kafka_connect)
     return create_app(
         gate=gate,
         secrets=secrets,

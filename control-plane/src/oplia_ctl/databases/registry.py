@@ -51,6 +51,8 @@ class DatabaseSpec(BaseModel):
     database: str | None = None          # postgres / cockroachdb / mysql schema / mongodb database
     dr_of: str | None = None             # for role=dr|replica: the name of its source database
     description: str = Field(default="", max_length=200)
+    # Kafka Connect sink connectors that write INTO this DR copy; paused while a resync replaces data
+    pause_connectors: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def _check(self) -> DatabaseSpec:
