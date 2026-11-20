@@ -33,6 +33,7 @@ class Store(Protocol):
     def open(self, key: str) -> Readable: ...
     def put(self, key: str, data: Readable, size: int, key_ref: str | None, tags: dict[str, str]) -> None: ...
     def head(self, key: str) -> ObjectInfo | None: ...
+    def delete(self, key: str) -> None: ...
 
 
 class S3Store:
@@ -69,6 +70,9 @@ class S3Store:
                 return None
             raise
         return ObjectInfo(key, int(h["ContentLength"]), str(h["ETag"]).strip('"'))
+
+    def delete(self, key: str) -> None:
+        self._s3.delete_object(Bucket=self.spec.bucket, Key=key)
 
 
 class BlobStore:
@@ -107,6 +111,9 @@ class BlobStore:
             return None
         return ObjectInfo(key, int(p.size), str(p.etag).strip('"'))
 
+    def delete(self, key: str) -> None:
+        self._c.delete_blob(key)
+
 
 class GCSStore:
     def __init__(self, spec: StoreSpec, bucket: Any = None) -> None:
@@ -134,6 +141,9 @@ class GCSStore:
     def head(self, key: str) -> ObjectInfo | None:
         b = self._b.get_blob(key)
         return None if b is None else ObjectInfo(key, int(b.size), str(b.etag))
+
+    def delete(self, key: str) -> None:
+        self._b.blob(key).delete()
 
 
 class _ChunkReader:

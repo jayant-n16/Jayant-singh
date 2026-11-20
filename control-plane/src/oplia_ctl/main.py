@@ -56,7 +56,7 @@ from oplia_ctl.network.service import NetworkService, NetworkSettings, TrafficDi
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
 from oplia_ctl.replication.config import ACTION_PIPELINE, ReplicationSettings
 from oplia_ctl.replication.images import ACTION_IMAGE_REPLICATE, ImageReplicator
-from oplia_ctl.replication.objects import ACTION_OBJECT_SYNC, ObjectReplicator
+from oplia_ctl.replication.objects import ACTION_OBJECT_DELETE, ACTION_OBJECT_SYNC, ObjectReplicator
 from oplia_ctl.replication.pipelines import KafkaConnect, PipelineExecutor
 from oplia_ctl.replication.stores import build_store
 from oplia_ctl.safety import Executor, SafetyGate
@@ -154,6 +154,7 @@ def build(settings: Settings) -> FastAPI:
         executors[ACTION_PIPELINE] = PipelineExecutor(kafka_connect)
     if object_replicator is not None:
         executors[ACTION_OBJECT_SYNC] = object_replicator
+        executors[ACTION_OBJECT_DELETE] = object_replicator.deletion_executor()
     if image_replicator is not None:
         executors[ACTION_IMAGE_REPLICATE] = image_replicator
     integrations = build_integrations(

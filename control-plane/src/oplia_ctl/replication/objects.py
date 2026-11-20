@@ -9,6 +9,12 @@ read it back and compare SHA-256. Only verified objects enter the manifest.
 
 Deletions are never replicated automatically: objects missing at the source are reported
 (``missing_at_source``) so a person decides - a DR copy must survive a deletion at the source.
+A pair may opt in with ``replicate_deletions: true`` (default false). Then ``plan_deletions``
+lists replicated objects that are gone at the source and a separate ``dr.object_delete``
+proposal (four-eyes, kill switch) removes them from the target. The executor re-checks each key
+is still absent at the source, refuses a batch larger than ``max_delete_fraction`` of the
+replicated objects (a mass deletion at the source looks like an incident, not housekeeping),
+and records every deleted key in the run summary.
 """
 
 from __future__ import annotations
@@ -30,6 +36,8 @@ from oplia_ctl.replication.streams import HashingReader
 from oplia_ctl.replication.tags import map_tags
 
 ACTION_OBJECT_SYNC = "dr.object_sync"
+ACTION_OBJECT_DELETE = "dr.object_delete"
+MAX_DELETES_PER_PROPOSAL = 1000
 
 
 class ObjectPair(BaseModel):
@@ -40,6 +48,8 @@ class ObjectPair(BaseModel):
     prefix: str = ""
     target_key: str | None = None            # key reference on the target cloud (see keys.py)
     tags: dict[str, str] = Field(default_factory=dict)   # applied to every target object, mapped per cloud
+    replicate_deletions: bool = False        # opt in: lets a gated proposal remove target copies
+    max_delete_fraction: float = Field(default=0.1, gt=0, le=1)   # refuse batches above this share
 
     def model_post_init(self, _: Any) -> None:
         if self.source.cloud == self.target.cloud and self.source.bucket == self.target.bucket:
@@ -85,6 +95,19 @@ class ObjectReplicator:
         return {"pair": name, "objects": todo, "bytes": total_bytes, "truncated": more,
                 "missing_at_source": sorted(set(man) - seen)[:1000],
                 "tags": map_tags(p.tags, p.target.cloud).__dict__}
+
+    def plan_deletions(self, name: str) -> dict[str, Any]:
+        """Replicated keys that no longer exist at the source (head-checked one by one)."""
+        p = self._pair(name)
+        if not p.replicate_deletions:
+            raise PermissionError(f"pair {name} does not replicate deletions (replicate_deletions is false)")
+        man = self._manifest(name)
+        listed = {o.key for o in self._stores(p.source).list(p.prefix)}
+        src = self._stores(p.source)
+        gone = [k for k in sorted(set(man) - listed) if src.head(k) is None]
+        more = len(gone) > MAX_DELETES_PER_PROPOSAL
+        return {"pair": name, "keys": gone[:MAX_DELETES_PER_PROPOSAL], "truncated": more,
+                "replicated_objects": len(man), "limit_fraction": p.max_delete_fraction}
 
     def describe(self, payload: dict[str, Any]) -> str:
         p = self._pair(str(payload.get("pair")))
@@ -136,6 +159,63 @@ class ObjectReplicator:
             raise RuntimeError(json.dumps(result)[:2000])
         return result
 
+    def _delete_guard(self, p: ObjectPair, keys: list[str]) -> None:
+        if not p.replicate_deletions:
+            raise PermissionError(f"pair {p.name} does not replicate deletions (replicate_deletions is false)")
+        if not keys or len(keys) > MAX_DELETES_PER_PROPOSAL:
+            raise ValueError(f"1 to {MAX_DELETES_PER_PROPOSAL} keys per deletion proposal")
+        total = len(self._manifest(p.name))
+        if total == 0 or len(keys) > p.max_delete_fraction * total:
+            raise PermissionError(f"refusing to delete {len(keys)} of {total} replicated objects "
+                                  f"(limit {p.max_delete_fraction:.0%}); investigate the source first")
+
+    def describe_delete(self, payload: dict[str, Any]) -> str:
+        p = self._pair(str(payload.get("pair")))
+        keys = [str(k) for k in payload.get("keys") or []]
+        self._delete_guard(p, keys)
+        return (f"Delete {len(keys)} object(s) from {p.target.cloud}:{p.target.bucket} that no longer exist at "
+                f"{p.source.cloud}:{p.source.bucket} (each re-checked at the source first)")
+
+    def delete(self, payload: dict[str, Any]) -> dict[str, Any]:
+        p = self._pair(str(payload.get("pair")))
+        keys = [str(k) for k in payload.get("keys") or []]
+        self._delete_guard(p, keys)
+        src, dst = self._stores(p.source), self._stores(p.target)
+        man = self._manifest(p.name)
+        started = self._now()
+        deleted, skipped, failed = [], [], []
+        for key in keys:
+            try:
+                if key not in man:
+                    skipped.append({"key": key, "reason": "not in the replication manifest"})
+                    continue
+                if src.head(key) is not None:
+                    skipped.append({"key": key, "reason": "exists at the source again"})
+                    continue
+                if dst.head(key) is not None:
+                    dst.delete(key)
+                    if dst.head(key) is not None:
+                        raise RuntimeError("object still present at the target after delete")
+                with self._sf() as s, s.begin():
+                    s.execute(delete(ObjectManifestRow).where(ObjectManifestRow.pair == p.name,
+                                                              ObjectManifestRow.key == key))
+                deleted.append(key)
+            except Exception as exc:
+                failed.append({"key": key, "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+        status = "FAILED" if failed and not deleted else "PARTIAL" if failed or skipped else "OK"
+        summary = {"deleted": deleted[:1000], "skipped": skipped[:200], "failed": failed[:200]}
+        with self._sf() as s, s.begin():
+            s.add(ReplicationRunRow(id=str(uuid.uuid4()), pair=p.name, started_at=started, finished_at=self._now(),
+                                    status=status, copied=0, bytes=0,
+                                    summary_json=json.dumps({"kind": "delete", **summary})))
+        result = {"pair": p.name, "status": status, **summary}
+        if failed and not deleted:
+            raise RuntimeError(json.dumps(result)[:2000])
+        return result
+
+    def deletion_executor(self) -> DeletionExecutor:
+        return DeletionExecutor(self)
+
     def _record(self, pair: str, key: str, etag: str, size: int, sha: str) -> None:
         with self._sf() as s, s.begin():
             s.execute(delete(ObjectManifestRow).where(ObjectManifestRow.pair == pair, ObjectManifestRow.key == key))
@@ -151,9 +231,23 @@ class ObjectReplicator:
                 n = len(s.scalars(select(ObjectManifestRow.id).where(ObjectManifestRow.pair == name)).all())
                 out.append({"pair": name, "source": f"{p.source.cloud}:{p.source.bucket}/{p.prefix}",
                             "target": f"{p.target.cloud}:{p.target.bucket}", "target_key": p.target_key,
+                            "replicate_deletions": p.replicate_deletions,
                             "replicated_objects": n,
                             "last_run": None if last is None else {
                                 "status": last.status, "started_at": last.started_at.isoformat(),
                                 "copied": last.copied, "bytes": last.bytes,
                                 "summary": json.loads(last.summary_json)}})
         return out
+
+
+class DeletionExecutor:
+    """Gate executor for ``dr.object_delete`` (separate from the copy executor)."""
+
+    def __init__(self, rep: ObjectReplicator) -> None:
+        self._rep = rep
+
+    def describe(self, payload: dict[str, Any]) -> str:
+        return self._rep.describe_delete(payload)
+
+    def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._rep.delete(payload)

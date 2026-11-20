@@ -49,6 +49,8 @@ POST /network/endpoint-groups/{key}/traffic-dial   operator/approver: propose a 
 GET  /dr/replication                  operator/approver: CDC pipelines, object pairs, image jobs
 POST /dr/replication/pipelines/{name}/{action}     propose pause/resume/restart of a CDC connector (gated)
 POST /dr/replication/objects/{pair}/plan           propose an incremental object sync (gated)
+POST /dr/replication/objects/{pair}/deletions      propose removing target copies deleted at the source
+                                                   (only pairs with replicate_deletions: true; gated)
 POST /dr/replication/images                        propose a VM image replication (gated, worker runs it)
 POST /dr/replication/tags/preview                  how tags map to aws/azure/gcp (no side effects)
 """
@@ -85,7 +87,7 @@ from oplia_ctl.network.service import NetworkService
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
 from oplia_ctl.replication.config import ACTION_PIPELINE
 from oplia_ctl.replication.images import ACTION_IMAGE_REPLICATE, ImageReplicator, validate_request
-from oplia_ctl.replication.objects import ACTION_OBJECT_SYNC, ObjectReplicator
+from oplia_ctl.replication.objects import ACTION_OBJECT_DELETE, ACTION_OBJECT_SYNC, ObjectReplicator
 from oplia_ctl.replication.pipelines import ACTIONS as PIPELINE_ACTIONS
 from oplia_ctl.replication.pipelines import KafkaConnect
 from oplia_ctl.replication.tags import map_tags
@@ -679,6 +681,32 @@ def create_app(
                                         f": {body.reason}")[:2000],
                                 requested_by=p.subject)
         return {**_proposal_json(proposal), "plan": {k: plan[k] for k in ("bytes", "truncated", "missing_at_source")}}
+
+    @app.post("/dr/replication/objects/{pair}/deletions", status_code=status.HTTP_201_CREATED)
+    def replication_object_deletions(pair: str, body: ReasonBody,
+                                     p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        if object_replicator is None or pair not in object_replicator.pairs:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown object replication pair")
+        try:
+            plan = object_replicator.plan_deletions(pair)
+        except PermissionError as exc:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
+        except Exception as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                                f"could not check the source: {type(exc).__name__}: {str(exc)[:300]}") from None
+        if not plan["keys"]:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "nothing to delete: every replicated object exists at the source")
+        payload = {"pair": pair, "keys": plan["keys"]}
+        try:
+            object_replicator.describe_delete(payload)
+        except (PermissionError, ValueError) as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+        proposal = gate.propose(action_type=ACTION_OBJECT_DELETE, target=pair, payload=payload,
+                                reason=(f"DR delete replication {pair}: {len(plan['keys'])} object(s) gone at the "
+                                        f"source{' (truncated)' if plan['truncated'] else ''}: {body.reason}")[:2000],
+                                requested_by=p.subject)
+        return {**_proposal_json(proposal), "plan": {k: plan[k] for k in ("truncated", "replicated_objects")}}
 
     @app.post("/dr/replication/images", status_code=status.HTTP_201_CREATED)
     def replication_image(body: ImageReplicateBody, p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:

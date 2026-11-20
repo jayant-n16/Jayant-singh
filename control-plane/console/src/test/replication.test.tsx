@@ -42,4 +42,21 @@ describe("DR replication", () => {
     await userEvent.click(within(dlg).getByRole("button", { name: "Create proposal" }));
     await waitFor(() => expect(calls.some((c) => c.path === "/dr/replication/pipelines/pg-orders/restart")).toBe(true));
   });
+
+  it("offers deletion proposals only for pairs that opt in", async () => {
+    expect(screen.queryByRole("button", { name: "Propose deletions…" })).toBeNull();
+    const optIn = { ...status, object_pairs: [{ ...status.object_pairs[0], replicate_deletions: true,
+      last_run: { status: "OK", started_at: "2026-11-20T11:00:00+00:00", copied: 0, bytes: 0, summary: { kind: "delete" as const, deleted: ["p/1", "p/2"], skipped: [], failed: [] } } }] };
+    const { api, calls } = fakeApi([
+      { method: "GET", path: "/dr/replication", reply: optIn },
+      { method: "POST", path: "/dr/replication/objects/data/deletions", reply: { id: "p-2", status: "PENDING" } },
+    ]);
+    renderAt(<Replication />, { api, user: me() });
+    expect(await screen.findByText(/2 deleted, 0 failed, 0 skipped/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Propose deletions…" }));
+    const dlg = screen.getByRole("dialog");
+    await userEvent.type(within(dlg).getByLabelText(/Reason/), "source bucket cleanup");
+    await userEvent.click(within(dlg).getByRole("button", { name: "Create proposal" }));
+    await waitFor(() => expect(calls.find((c) => c.path === "/dr/replication/objects/data/deletions")?.body).toEqual({ reason: "source bucket cleanup" }));
+  });
 });

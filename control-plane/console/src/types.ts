@@ -272,7 +272,8 @@ export interface NetworkStatus {
 export interface Connector { name: string; type: string; class: string; state: string; worker: string; failed_tasks: number; tasks: { id: number; state: string; trace: string }[] }
 export interface ObjectPairStatus {
   pair: string; source: string; target: string; target_key: string | null; replicated_objects: number;
-  last_run: null | { status: string; started_at: string; copied: number; bytes: number; summary: { skipped: { key: string; reason: string }[]; failed: { key: string; error: string }[] } };
+  replicate_deletions?: boolean;
+  last_run: null | { status: string; started_at: string; copied: number; bytes: number; summary: { kind?: "delete"; deleted?: string[]; skipped: { key: string; reason: string }[]; failed: { key: string; error: string }[] } };
 }
 export interface ImageJob { id: string; source_cloud: string; source_id: string; target_cloud: string; name: string; status: string; step: string; error: string | null; created_at: string; updated_at: string; state: Record<string, unknown> }
 export interface ReplicationStatus {

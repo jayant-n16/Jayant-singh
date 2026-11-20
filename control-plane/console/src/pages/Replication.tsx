@@ -9,6 +9,7 @@ import type { Connector, ObjectPairStatus, Proposal, ReplicationStatus, TagMap }
 type Dialog =
   | { kind: "pipeline"; c: Connector; action: "pause" | "resume" | "restart" }
   | { kind: "objects"; p: ObjectPairStatus }
+  | { kind: "deletions"; p: ObjectPairStatus }
   | { kind: "image" };
 
 export default function Replication() {
@@ -68,8 +69,11 @@ export default function Replication() {
                     <td className="small mono">{p.source} → {p.target}</td>
                     <td className="small mono">{p.target_key ?? "target default"}</td>
                     <td>{p.replicated_objects}</td>
-                    <td className="small">{p.last_run ? <><Badge value={p.last_run.status} /> {fmtTime(p.last_run.started_at)} · {p.last_run.copied} copied, {p.last_run.summary.failed.length} failed, {p.last_run.summary.skipped.length} skipped</> : "never"}</td>
-                    <td><button className="btn" onClick={() => setDlg({ kind: "objects", p })}>Plan sync…</button></td>
+                    <td className="small">{p.last_run ? <><Badge value={p.last_run.status} /> {fmtTime(p.last_run.started_at)} · {p.last_run.summary.kind === "delete" ? `${p.last_run.summary.deleted?.length ?? 0} deleted` : `${p.last_run.copied} copied`}, {p.last_run.summary.failed.length} failed, {p.last_run.summary.skipped.length} skipped</> : "never"}</td>
+                    <td className="row-actions">
+                      <button className="btn" onClick={() => setDlg({ kind: "objects", p })}>Plan sync…</button>
+                      {p.replicate_deletions ? <button className="btn" onClick={() => setDlg({ kind: "deletions", p })}>Propose deletions…</button> : null}
+                    </td>
                   </tr>
                 ))}</tbody>
               </TableWrap>
@@ -129,10 +133,17 @@ export default function Replication() {
       ) : null}
       {dlg?.kind === "objects" ? (
         <ActionDialog title={`Plan an object sync for ${dlg.p.pair}`} confirmLabel="Create proposal"
-          description="Lists the source now and proposes copying new or changed objects. Deletions at the source are reported, never replicated."
+          description="Lists the source now and proposes copying new or changed objects. Deletions at the source are reported here; removing them from the DR copy is a separate proposal, only for pairs that opt in."
           fields={[{ name: "reason", label: "Reason (recorded)", kind: "textarea", required: true, minLength: 5, maxLength: 2000 }]}
           onClose={() => setDlg(null)}
           onSubmit={async (v) => go(await api.post<Proposal>(`/dr/replication/objects/${encodeURIComponent(dlg.p.pair)}/plan`, { reason: String(v.reason) }))} />
+      ) : null}
+      {dlg?.kind === "deletions" ? (
+        <ActionDialog title={`Propose deletions for ${dlg.p.pair}`} confirmLabel="Create proposal" danger
+          description="Lists replicated objects that no longer exist at the source and proposes removing them from the DR copy. Refused if the batch is larger than the pair's limit. Each key is checked at the source again when executed."
+          fields={[{ name: "reason", label: "Reason (recorded)", kind: "textarea", required: true, minLength: 5, maxLength: 2000 }]}
+          onClose={() => setDlg(null)}
+          onSubmit={async (v) => go(await api.post<Proposal>(`/dr/replication/objects/${encodeURIComponent(dlg.p.pair)}/deletions`, { reason: String(v.reason) }))} />
       ) : null}
       {dlg?.kind === "image" && d ? (
         <ActionDialog title="Propose an image replication" confirmLabel="Create proposal"

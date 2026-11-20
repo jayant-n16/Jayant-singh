@@ -202,6 +202,9 @@ class FakeStore:
             None if key not in self.objs else ObjectInfo(key, len(self.objs[key]), f"e{hash(self.objs[key]) & 0xFFFF}")
         )
 
+    def delete(self, key):
+        self.objs.pop(key, None)
+
 
 S3_SRC = StoreSpec(cloud="aws", bucket="prod-data", region="ap-south-1")
 AZ_DST = StoreSpec(cloud="azure", bucket="dr", account_url="https://dr.blob.core.windows.net")
@@ -242,6 +245,92 @@ def test_object_sync_incremental_with_checksums(session_factory):
     assert "p/b" in dst.objs
     st = rep.status()[0]
     assert st["replicated_objects"] == 2 and st["last_run"]["status"] == "PARTIAL"
+
+
+def _del_rep(session_factory, src, dst, **kw):
+    pair = ObjectPair(name="data", source=S3_SRC, target=AZ_DST, prefix="p/", replicate_deletions=True, **kw)
+    return ObjectReplicator([pair], session_factory, lambda spec: {"aws": src, "azure": dst}[spec.cloud])
+
+
+def _seed(rep, src, n):
+    for i in range(n):
+        src.objs[f"p/{i:03}"] = f"v{i}".encode()
+    rep({"pair": "data", "objects": rep.plan("data")["objects"]})
+
+
+def test_deletions_are_off_by_default(session_factory):
+    src, dst = FakeStore(S3_SRC), FakeStore(AZ_DST)
+    rep = _rep(session_factory, {("aws", "prod-data"): src, ("azure", "dr"): dst})
+    src.objs["p/a"] = b"x"
+    rep({"pair": "data", "objects": rep.plan("data")["objects"]})
+    del src.objs["p/a"]
+    assert rep.plan("data")["missing_at_source"] == ["p/a"]
+    with pytest.raises(PermissionError, match="replicate_deletions is false"):
+        rep.plan_deletions("data")
+    with pytest.raises(PermissionError, match="replicate_deletions is false"):
+        rep.deletion_executor()({"pair": "data", "keys": ["p/a"]})
+    assert dst.objs["p/a"] == b"x"
+
+
+def test_deletion_replication_rechecks_source_and_updates_manifest(session_factory):
+    src, dst = FakeStore(S3_SRC), FakeStore(AZ_DST)
+    rep = _del_rep(session_factory, src, dst, max_delete_fraction=0.5)
+    _seed(rep, src, 10)
+    del src.objs["p/001"], src.objs["p/002"], src.objs["p/003"]
+    plan = rep.plan_deletions("data")
+    assert plan["keys"] == ["p/001", "p/002", "p/003"] and plan["replicated_objects"] == 10
+    src.objs["p/003"] = b"back"                       # re-created after the plan
+    ex = rep.deletion_executor()
+    assert "Delete 3 object(s)" in ex.describe({"pair": "data", "keys": plan["keys"]})
+    res = ex({"pair": "data", "keys": plan["keys"]})
+    assert res["status"] == "PARTIAL" and res["deleted"] == ["p/001", "p/002"]
+    assert res["skipped"] == [{"key": "p/003", "reason": "exists at the source again"}]
+    assert "p/001" not in dst.objs and "p/003" in dst.objs and "p/004" in dst.objs
+    assert rep.plan_deletions("data")["keys"] == []   # manifest rows removed for deleted keys
+    assert rep.status()[0]["last_run"]["summary"]["kind"] == "delete"
+
+
+def test_mass_deletion_is_refused(session_factory):
+    src, dst = FakeStore(S3_SRC), FakeStore(AZ_DST)
+    rep = _del_rep(session_factory, src, dst)             # default limit 10%
+    _seed(rep, src, 20)
+    for i in range(5):
+        del src.objs[f"p/{i:03}"]
+    keys = rep.plan_deletions("data")["keys"]
+    with pytest.raises(PermissionError, match="refusing to delete 5 of 20"):
+        rep.deletion_executor().describe({"pair": "data", "keys": keys})
+    with pytest.raises(PermissionError, match="refusing"):
+        rep.delete({"pair": "data", "keys": keys})
+    assert len(dst.objs) == 20
+
+
+def test_deletion_proposal_goes_through_the_gate(session_factory):
+    from oplia_ctl.replication.objects import ACTION_OBJECT_DELETE
+    from oplia_ctl.safety.gate import FourEyesViolationError, SafetyGate
+
+    src, dst = FakeStore(S3_SRC), FakeStore(AZ_DST)
+    rep = _del_rep(session_factory, src, dst)
+    _seed(rep, src, 20)
+    del src.objs["p/007"]
+    gate = SafetyGate(session_factory, dry_run=False)
+    prop = gate.propose(action_type=ACTION_OBJECT_DELETE, target="data",
+                        payload={"pair": "data", "keys": rep.plan_deletions("data")["keys"]},
+                        reason="source cleanup", requested_by="olga")
+    with pytest.raises(FourEyesViolationError):
+        gate.approve(prop.id, "olga")
+    gate.approve(prop.id, "ivan")
+    done = gate.execute(prop.id, rep.deletion_executor(), "olga")
+    assert done.status.value == "EXECUTED" and "p/007" not in dst.objs and len(dst.objs) == 19
+
+
+@mock_aws
+def test_s3_store_delete(session_factory):
+    s3 = boto3.client("s3", region_name="ap-south-1")
+    s3.create_bucket(Bucket="prod-data", CreateBucketConfiguration={"LocationConstraint": "ap-south-1"})
+    s3.put_object(Bucket="prod-data", Key="p/a", Body=b"x")
+    st = S3Store(S3_SRC, s3)
+    st.delete("p/a")
+    assert st.head("p/a") is None
 
 
 @mock_aws
@@ -826,3 +915,27 @@ def test_api_replication(gate, session_factory):
 def test_api_replication_not_configured(gate):
     api = _app(gate)
     assert api.get("/dr/replication", headers=bearer("olga", "oplia-operator")).status_code == 503
+
+
+def test_api_deletion_proposals(gate, session_factory):
+    src, dst = FakeStore(S3_SRC), FakeStore(AZ_DST)
+    off = _rep(session_factory, {("aws", "prod-data"): src, ("azure", "dr"): dst})
+    op = bearer("olga", "oplia-operator")
+    api = _app(gate, object_replicator=off)
+    r = api.post("/dr/replication/objects/data/deletions", headers=op, json={"reason": "cleanup"})
+    assert r.status_code == 403 and "replicate_deletions is false" in r.json()["detail"]
+
+    on = _del_rep(session_factory, src, dst)
+    api = _app(gate, object_replicator=on)
+    assert api.post("/dr/replication/objects/data/deletions", headers=op, json={"reason": "cleanup"}).status_code == 409
+    _seed(on, src, 20)
+    del src.objs["p/004"]
+    r = api.post("/dr/replication/objects/data/deletions", headers=op, json={"reason": "cleanup"})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["action_type"] == "dr.object_delete" and body["payload"]["keys"] == ["p/004"]
+    for i in range(5, 12):
+        del src.objs[f"p/{i:03}"]
+    r = api.post("/dr/replication/objects/data/deletions", headers=op, json={"reason": "cleanup"})
+    assert r.status_code == 409 and "refusing to delete 8 of 20" in r.json()["detail"]
+    assert api.get("/dr/replication", headers=op).json()["object_pairs"][0]["replicate_deletions"] is True
