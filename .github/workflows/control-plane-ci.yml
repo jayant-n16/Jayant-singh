@@ -310,12 +310,20 @@ jobs:
           openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=identity.linkerd.cluster.local" -keyout "$t/issuer.key" -out "$t/issuer.csr"
           printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$t/ext"
           openssl x509 -req -in "$t/issuer.csr" -CA "$t/ca.crt" -CAkey "$t/ca.key" -CAcreateserial -days 1 -extfile "$t/ext" -out "$t/issuer.crt"
-          ht131 linkerd-crds linkerd-edge/linkerd-crds --version 2026.10.2 -n linkerd | kc131 -
+          ht131 linkerd-crds linkerd-edge/linkerd-crds --version 2026.10.2 -n linkerd > "$r/l5d-crds.yaml"
+          kc131 "$r/l5d-crds.yaml"
           ht131 linkerd-control-plane linkerd-edge/linkerd-control-plane --version 2026.10.2 -n linkerd \
             -f mesh/linkerd/values.yaml --set-file identityTrustAnchorsPEM="$t/ca.crt" \
-            --set-file identity.issuer.tls.crtPEM="$t/issuer.crt" --set-file identity.issuer.tls.keyPEM="$t/issuer.key" | kc131 -
+            --set-file identity.issuer.tls.crtPEM="$t/issuer.crt" --set-file identity.issuer.tls.keyPEM="$t/issuer.key" > "$r/l5d-cp.yaml"
           ht131 linkerd-multicluster linkerd-edge/linkerd-multicluster --version 2026.10.2 -n linkerd-multicluster \
-            -f mesh/linkerd/multicluster-values.yaml | kc131 -
+            -f mesh/linkerd/multicluster-values.yaml > "$r/l5d-mc.yaml"
+          # Linkerd policy resources (Server, AuthorizationPolicy, ...) are checked against the CRDs
+          # from linkerd-crds; everything else with kubeconform.
+          for f in l5d-cp l5d-mc; do
+            python3 ../scripts/split-crs.py "$r/$f.yaml" "$r/$f-core.yaml" "$r/$f-crs.yaml" linkerd.io
+            kc131 "$r/$f-core.yaml"
+            if grep -q '^kind:' "$r/$f-crs.yaml"; then python3 ../scripts/validate-crs.py "$r/l5d-crds.yaml" "$r/$f-crs.yaml"; fi
+          done
       - name: CDC connector configs are valid JSON
         run: for f in dr/cdc/*.json; do python3 -m json.tool "$f" > /dev/null; done
       - name: OTel sidecar config loads in the pinned collector (otelcol validate)
