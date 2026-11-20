@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from oplia_ctl.replication.dns_failover import DnsFailover, DnsSettings
 from oplia_ctl.replication.drills import DrillSettings, RestoreDrills
 from oplia_ctl.replication.images import ImageSettings
 from oplia_ctl.replication.jobs import JobMachine
@@ -34,12 +35,13 @@ class ReplicationSettings(BaseSettings):
     registries: RegistrySettings | None = None                          # JSON object
     velero: VeleroSettings | None = None                                # JSON object
     vault: VaultDrSettings | None = None                                # JSON object
+    dns: DnsSettings | None = None                                      # JSON object
 
     def enabled(self) -> bool:
         return bool(self.object_pairs or self.images or self.kafka_connect_url or self.job_modules_configured())
 
     def job_modules_configured(self) -> bool:
-        return any(m is not None for m in (self.drills, self.registries, self.velero, self.vault))
+        return any(m is not None for m in (self.drills, self.registries, self.velero, self.vault, self.dns))
 
 
 def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
@@ -55,6 +57,8 @@ def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
         machines.append(VeleroBackups(cfg.velero, session_factory, secrets=secrets, audit=audit))
     if cfg.vault is not None:
         machines.append(VaultSnapshots(cfg.vault, session_factory, secrets=secrets, audit=audit))
+    if cfg.dns is not None:
+        machines.append(DnsFailover(cfg.dns, session_factory, audit=audit))
     return {m.kind: m for m in machines}
 
 

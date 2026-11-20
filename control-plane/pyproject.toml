@@ -22,6 +22,7 @@ dependencies = [
   "azure-mgmt-network>=25.3",
   "azure-mgmt-resource>=23.0",
   "azure-mgmt-compute>=33.0",
+  "azure-mgmt-trafficmanager==2.0.0",
   "kubernetes>=29.0",
 ]
 
