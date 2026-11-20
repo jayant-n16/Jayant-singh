@@ -179,10 +179,17 @@ def test_crdb_refuses_read_only_target_and_oversized_tables(gate, session_factor
     small = ConsistencySettings(recheck_delay_seconds=0, checksum_chunk_rows=100, checksum_max_rows=100)
     with pytest.raises(ValueError, match="more than 100 rows"):
         ResyncExecutor(reg, small)({"source": "src", "target": "dr", "tables": ["public.orders"]})
-    conns["cr_dr"].execute("ALTER DATABASE cr_dr SET default_transaction_read_only = on")
-    try:
-        with pytest.raises(RuntimeError, match="read-only"):
-            ResyncExecutor(reg, CFG)({"source": "src", "target": "dr", "tables": ["public.orders"]})
-    finally:
-        conns["cr_dr"].execute("SET default_transaction_read_only = off")
-        conns["cr_dr"].execute("ALTER DATABASE cr_dr RESET default_transaction_read_only")
+    # role defaults: observed in CI that ALTER DATABASE ... SET did not apply to the root user, so the
+    # DR copy is reached as a normal SQL user whose session default is read-only
+    c = conns["cr_dr"]
+    c.execute("DROP USER IF EXISTS oplia_dr")
+    c.execute("CREATE USER oplia_dr")
+    c.execute("GRANT ALL ON DATABASE cr_dr TO oplia_dr")
+    c.execute("GRANT ALL ON TABLE cr_dr.public.* TO oplia_dr")
+    c.execute("ALTER ROLE oplia_dr IN DATABASE cr_dr SET default_transaction_read_only = on")
+    base = secrets["d"].rsplit("/", 1)[0].replace("root@", "oplia_dr@")
+    ro = {**secrets, "d": f"{base}/cr_dr"}
+    reg = DatabaseRegistry(_specs("cockroachdb", "cr_src", "cr_dr"), StaticSecretProvider(ro), session_factory)
+    with pytest.raises(RuntimeError, match="read-only"):
+        ResyncExecutor(reg, CFG)({"source": "src", "target": "dr", "tables": ["public.orders"]})
+    assert c.execute("SELECT count(*) FROM orders").fetchone()[0] == 250
