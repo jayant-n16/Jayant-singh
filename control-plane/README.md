@@ -29,6 +29,17 @@ identities or data passes through one safety gate.
 FinOps, JIT access, AIOps. Sign-in with Entra ID / Okta (OIDC + PKCE); the API enforces every
 permission. See `console/README.md` to run it locally with the dev login.
 
+## Compute inventory and power actions
+
+`oplia-inventory-scan` (CronJob every 30 min) reads compute resources from the FinOps inventory
+sources (EC2, Azure VMs/scale sets/AKS, GCE/GKE via Cloud Asset, IBM VPC instances/clusters) into
+`inventory_instances`; size and state are stored only where the listing API returns them (EC2 type
+and state, GCP asset state) - otherwise empty, never guessed. A machine is marked gone only if its
+source answered completely. `GET /inventory/instances` (filters `cloud`, `region`, `state`) serves the
+console **Infrastructure** screen. Start/stop is a gated proposal (`compute.power`): AWS
+Start/StopInstances, Azure start/deallocate, GCP instances.start/stop, IBM VPC instance actions.
+Tested with moto (AWS) and fakes/respx (Azure, GCP, IBM); not run against real accounts.
+
 ## Try it locally with a login (development only)
 
 `oplia-dev-idp` is a local OIDC login (authorization code + PKCE) so the API - and the admin

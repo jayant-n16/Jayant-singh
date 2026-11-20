@@ -12,6 +12,7 @@ import oplia_ctl.aiops.models
 import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models
+import oplia_ctl.inventory.models
 import oplia_ctl.safety.models  # noqa: F401
 from oplia_ctl.db import Base
 

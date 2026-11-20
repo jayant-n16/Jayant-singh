@@ -35,6 +35,9 @@ GET  /kill-switch                     operator/approver: current state, who set 
 POST /kill-switch                     approver: engage/release
 GET  /audit/events                    approver: audit log, newest first (?before_seq=&limit=&proposal_id=)
 GET  /audit/verify                    approver: verify the audit hash chain
+GET  /inventory/instances             operator/approver: cached compute inventory (?cloud=&region=&state=)
+GET  /inventory/scans                 operator/approver: inventory scan history
+POST /inventory/instances/{id}/power  operator/approver: propose start/stop (compute.power, gated)
 """
 
 
@@ -54,10 +57,13 @@ from oplia_ctl.aiops.escalation import EscalationScheduler, Prediction, Predicti
 from oplia_ctl.aiops.matrix import Alert
 from oplia_ctl.aiops.models import PredictionStatus
 from oplia_ctl.auth import AuthError, OIDCVerifier, Principal, verify_webhook
+from oplia_ctl.cloud.power import parse_target as parse_power_target
 from oplia_ctl.dr.breaker import CircuitBreaker, list_incidents
 from oplia_ctl.finops.compliance import list_findings, list_scans
 from oplia_ctl.finops.optimizer import MaintenanceWindowClosedError, list_candidates
 from oplia_ctl.identity.jit import JitConflictError, JitRequestError, JitService
+from oplia_ctl.inventory.scanner import list_instances as list_inventory_instances
+from oplia_ctl.inventory.scanner import list_scans as list_inventory_scans
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
 from oplia_ctl.safety import (
     Executor,
@@ -101,6 +107,14 @@ class DrResetBody(BaseModel):
 class DecisionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     note: str = Field(default="", max_length=2000)
+
+ACTION_COMPUTE_POWER = "compute.power"
+
+
+class PowerBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation: Literal["start", "stop"]
+    reason: str = Field(min_length=5, max_length=2000)
 
 
 class KillSwitchBody(BaseModel):
@@ -147,6 +161,7 @@ def create_app(
     jit: JitService | None = None,
     dr_breaker: CircuitBreaker | None = None,
     db_ping: Callable[[], None] | None = None,
+    inventory_sf: sessionmaker[Session] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -411,6 +426,45 @@ def create_app(
     def finops_candidates(_: Annotated[Principal, Depends(reader)], limit: int = 200) -> list[dict[str, Any]]:
         return list_candidates(_finops(), limit)
 
+    # ------------------------------------------------------------ inventory
+    def _inventory() -> sessionmaker[Session]:
+        if inventory_sf is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "compute inventory not configured (no cloud)")
+        return inventory_sf
+
+    @app.get("/inventory/instances")
+    def inventory_instances(_: Annotated[Principal, Depends(reader)], cloud: str | None = None,
+                            region: str | None = None, state: str | None = None, include_gone: bool = False,
+                            limit: int = 500) -> list[dict[str, Any]]:
+        if cloud not in (None, "aws", "azure", "gcp", "ibm"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "cloud must be aws, azure, gcp or ibm")
+        return list_inventory_instances(_inventory(), cloud=cloud, region=region or None, state=state or None,
+                                        include_gone=include_gone, limit=limit)
+
+    @app.post("/inventory/instances/{instance_id}/power", status_code=status.HTTP_201_CREATED)
+    def inventory_power(instance_id: str, body: PowerBody,
+                        p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        rows = [r for r in list_inventory_instances(_inventory(), include_gone=False, limit=2000)
+                if r["id"] == instance_id]
+        if not rows:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "instance not in the current inventory")
+        inst = rows[0]
+        try:
+            parse_power_target(inst["cloud"], inst["resource_id"])
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
+        proposal = gate.propose(
+            action_type=ACTION_COMPUTE_POWER, target=inst["resource_id"],
+            payload={"cloud": inst["cloud"], "resource_id": inst["resource_id"], "operation": body.operation,
+                     "name": inst["name"]},
+            reason=f"{body.operation} {inst['cloud']} instance {inst['name']}: {body.reason}"[:2000],
+            requested_by=p.subject)
+        return _proposal_json(proposal)
+
+    @app.get("/inventory/scans")
+    def inventory_scans(_: Annotated[Principal, Depends(reader)], limit: int = 20) -> list[dict[str, Any]]:
+        return list_inventory_scans(_inventory(), limit)
+
     # ------------------------------------------------------------------ JIT
     def _jit() -> JitService:
         if jit is None:
@@ -534,6 +588,7 @@ def create_app(
                         "read": p.has_role(approver_role) or p.has_role(operator_role)},
                 "features": {"aiops": escalation is not None or aiops_engine is not None,
                              "finops": finops_sf is not None, "jit": jit is not None,
+                             "inventory": inventory_sf is not None,
                              "dr": dr_breaker is not None}}
 
     @app.get("/kill-switch")

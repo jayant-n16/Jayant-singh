@@ -2,7 +2,7 @@ export interface Me {
   subject: string;
   roles: string[];
   can: { approve: boolean; operate: boolean; read: boolean };
-  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean };
 }
 
 export type ProposalStatus =
@@ -158,4 +158,32 @@ export interface Prediction {
   channels: string[];
   escalated_at: string | null;
   last_error: string | null;
+}
+
+export interface Instance {
+  id: string;
+  cloud: "aws" | "azure" | "gcp" | "ibm";
+  scope: string;
+  region: string;
+  resource_type: string;
+  resource_id: string;
+  name: string;
+  size: string | null;
+  state: string | null;
+  tags: Record<string, string>;
+  tag_compliant: boolean;
+  tag_issues: string[];
+  first_seen_at: string;
+  last_seen_at: string;
+  gone_at: string | null;
+}
+
+export interface InventoryScan {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  instances_seen: number;
+  new_instances: number;
+  gone_instances: number;
+  source_errors: { source: string; error: string }[];
 }

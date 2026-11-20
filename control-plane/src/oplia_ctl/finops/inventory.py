@@ -40,6 +40,8 @@ class Resource:
     name: str
     tags: dict[str, str] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)  # GCP labels (lowercase keys only)
+    size: str | None = None   # machine type / size where the listing API returns it (EC2: InstanceType)
+    state: str | None = None  # lifecycle state where the listing API returns it (EC2 State.Name, GCP state)
 
 
 class InventorySource(Protocol):
@@ -95,7 +97,8 @@ class AwsInventory:
                         tags = _aws_tags(i.get("Tags"))
                         yield Resource("aws", acct, region, "compute", "ec2:instance",
                                        f"arn:aws:ec2:{region}:{acct}:instance/{i['InstanceId']}",
-                                       tags.get("Name", i["InstanceId"]), tags)
+                                       tags.get("Name", i["InstanceId"]), tags,
+                                       size=i.get("InstanceType"), state=i.get("State", {}).get("Name"))
             for page in ec2.get_paginator("describe_volumes").paginate():
                 for v in page["Volumes"]:
                     tags = _aws_tags(v.get("Tags"))
@@ -233,9 +236,10 @@ class GcpInventory:
                     key = str(t.tag_key).split("/", 1)[-1]
                     value = str(t.tag_value).split("/")[-1]
                     tags[key] = value
+                state = str(getattr(r, "state", "") or "") or None  # e.g. RUNNING / TERMINATED
                 yield Resource("gcp", scope, str(r.location or ""), GCP_ASSET_TYPES[str(r.asset_type)],
                                str(r.asset_type), str(r.name), str(r.display_name or r.name),
-                               tags, dict(r.labels or {}))
+                               tags, dict(r.labels or {}), state=state)
 
 
 IBM_IAM_URL = "https://iam.cloud.ibm.com/identity/token"

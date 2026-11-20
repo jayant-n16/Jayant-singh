@@ -10,7 +10,8 @@ from fastapi import FastAPI
 import oplia_ctl.aiops.models
 import oplia_ctl.dr.models
 import oplia_ctl.finops.models
-import oplia_ctl.identity.models  # noqa: F401  (registers the JIT table)
+import oplia_ctl.identity.models
+import oplia_ctl.inventory.models  # noqa: F401  (registers the tables)
 from oplia_ctl.aiops.config import AIOpsSettings, build_notifier, build_scheduler
 from oplia_ctl.aiops.engine import AIOpsEngine
 from oplia_ctl.aiops.escalation import EscalationScheduler
@@ -30,6 +31,7 @@ from oplia_ctl.auth import OIDCVerifier
 from oplia_ctl.cloud.aws_isolation import AwsInstanceIsolationExecutor
 from oplia_ctl.cloud.azure_isolation import AzureNicIsolationExecutor
 from oplia_ctl.cloud.k8s_isolation import K8sNamespaceIsolationExecutor
+from oplia_ctl.cloud.power import ComputePowerExecutor
 from oplia_ctl.config import Settings, get_settings
 from oplia_ctl.db import Base, make_engine, make_session_factory
 from oplia_ctl.dr.config import DRSettings, build_breaker
@@ -71,6 +73,7 @@ def build(settings: Settings) -> FastAPI:
         "isolate.aws": AwsInstanceIsolationExecutor(),
         "isolate.azure": AzureNicIsolationExecutor(),
         "isolate.k8s": K8sNamespaceIsolationExecutor(),
+        "compute.power": ComputePowerExecutor(secrets=secrets, client=client),
     }
     dr_cfg = DRSettings()
     dr_breaker = None
@@ -140,6 +143,9 @@ def build(settings: Settings) -> FastAPI:
         jit=jit,
         dr_breaker=dr_breaker,
         db_ping=sqlalchemy_ping(engine),
+        inventory_sf=make_session_factory(engine) if (
+            finops_cfg.aws_regions or finops_cfg.azure_subscriptions or finops_cfg.gcp_scopes
+            or finops_cfg.ibm_account_id) else None,
     )
 
 
