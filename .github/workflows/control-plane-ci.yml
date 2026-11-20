@@ -287,13 +287,19 @@ jobs:
       - name: service meshes render at the pinned chart versions (Consul 2.1.0, Linkerd edge 2026.10.2)
         run: |
           set -euo pipefail
-          crds='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-          kc() { kubeconform -strict -summary -kubernetes-version 1.30.0 -schema-location default -schema-location "$crds" "$@"; }
+          python3 -m pip install --quiet "jsonschema==4.26.0" "PyYAML==6.0.3"
+          # CRD objects themselves have no published schema for kubeconform; they are the vendors'
+          # definitions. Our own custom resources are validated against them (validate-crs.py).
+          kc() { kubeconform -strict -summary -kubernetes-version 1.30.0 -skip CustomResourceDefinition "$@"; }
+          ht() { helm template --kube-version 1.30.0 --api-versions policy/v1/PodDisruptionBudget "$@"; }
           helm repo add hashicorp https://helm.releases.hashicorp.com
           helm repo add linkerd-edge https://helm.linkerd.io/edge
           helm repo update
-          helm template --kube-version 1.30.0 consul hashicorp/consul --version 2.1.0 -n consul -f mesh/consul/values.yaml | kc -
-          kc mesh/consul/config-entries.yaml mesh/consul/peering-acceptor.yaml mesh/linkerd/oplia-link-reader.yaml
+          r=$(mktemp -d)
+          ht consul hashicorp/consul --version 2.1.0 -n consul -f mesh/consul/values.yaml > "$r/consul.yaml"
+          kc "$r/consul.yaml"
+          python3 ../scripts/validate-crs.py "$r/consul.yaml" mesh/consul/config-entries.yaml mesh/consul/peering-acceptor.yaml
+          kc mesh/linkerd/oplia-link-reader.yaml
           # throw-away CA and issuer for rendering only (real ones come from Vault PKI)
           t=$(mktemp -d)
           openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj "/CN=root.linkerd.cluster.local" \
@@ -301,11 +307,11 @@ jobs:
           openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=identity.linkerd.cluster.local" -keyout "$t/issuer.key" -out "$t/issuer.csr"
           printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$t/ext"
           openssl x509 -req -in "$t/issuer.csr" -CA "$t/ca.crt" -CAkey "$t/ca.key" -CAcreateserial -days 1 -extfile "$t/ext" -out "$t/issuer.crt"
-          helm template --kube-version 1.30.0 linkerd-crds linkerd-edge/linkerd-crds --version 2026.10.2 -n linkerd | kc -
-          helm template --kube-version 1.30.0 linkerd-control-plane linkerd-edge/linkerd-control-plane --version 2026.10.2 -n linkerd \
+          ht linkerd-crds linkerd-edge/linkerd-crds --version 2026.10.2 -n linkerd | kc -
+          ht linkerd-control-plane linkerd-edge/linkerd-control-plane --version 2026.10.2 -n linkerd \
             -f mesh/linkerd/values.yaml --set-file identityTrustAnchorsPEM="$t/ca.crt" \
             --set-file identity.issuer.tls.crtPEM="$t/issuer.crt" --set-file identity.issuer.tls.keyPEM="$t/issuer.key" | kc -
-          helm template --kube-version 1.30.0 linkerd-multicluster linkerd-edge/linkerd-multicluster --version 2026.10.2 -n linkerd-multicluster \
+          ht linkerd-multicluster linkerd-edge/linkerd-multicluster --version 2026.10.2 -n linkerd-multicluster \
             -f mesh/linkerd/multicluster-values.yaml | kc -
       - name: CDC connector configs are valid JSON
         run: for f in dr/cdc/*.json; do python3 -m json.tool "$f" > /dev/null; done
