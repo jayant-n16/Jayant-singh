@@ -29,8 +29,9 @@ meshGateway:
   replicas: 2
   service:
     type: LoadBalancer
-    annotations:
-      # internal LB: peering traffic stays on the private interconnect
+    # The chart takes this as a YAML *string*. Internal LB so peering traffic stays on the
+    # private interconnect; each cloud only reads its own annotation.
+    annotations: |
       service.beta.kubernetes.io/aws-load-balancer-scheme: internal
       service.beta.kubernetes.io/azure-load-balancer-internal: "true"
       networking.gke.io/load-balancer-type: Internal
