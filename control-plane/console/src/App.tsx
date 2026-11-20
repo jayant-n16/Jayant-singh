@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { BrowserRouter, NavLink, Route, Routes } from "react-router";
 
 import { createApi } from "./api";
+import { ConnectionBanner, ConnectionProvider, useConnection } from "./connection";
 import { useAuth } from "./auth";
 import { ErrorNote, Loading } from "./components/ui";
 import type { ConsoleConfig } from "./config";
@@ -31,14 +32,20 @@ export default function App({ config }: { config: ConsoleConfig }) {
     );
   return (
     <BrowserRouter>
-      <SignedIn config={config} />
+      <ConnectionProvider base={config.apiBase}>
+        <SignedIn config={config} />
+      </ConnectionProvider>
     </BrowserRouter>
   );
 }
 
 function SignedIn({ config }: { config: ConsoleConfig }) {
   const auth = useAuth();
-  const api = useMemo(() => createApi(config.apiBase, auth.accessToken, auth.sessionExpired), [config.apiBase, auth.accessToken, auth.sessionExpired]);
+  const conn = useConnection();
+  const api = useMemo(
+    () => createApi(config.apiBase, auth.accessToken, auth.sessionExpired, undefined, conn.report),
+    [config.apiBase, auth.accessToken, auth.sessionExpired, conn.report],
+  );
   const me = useResource(() => api.get<Me>("/me"), [api]);
 
   if (me.loading && !me.data) return <Centered><Loading what="your access" /></Centered>;
@@ -65,6 +72,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
           <button className="btn btn-small" onClick={() => void auth.signOut()}>Sign out</button>
         </div>
       </header>
+      <ConnectionBanner />
       {!m.can.read ? (
         <main id="main" className="content">
           <h1>No access</h1>
@@ -84,7 +92,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
             {m.features.jit ? <NavLink to="/jit">JIT access</NavLink> : null}
             {m.features.aiops ? <NavLink to="/aiops">AIOps</NavLink> : null}
           </nav>
-          <main id="main" className="content">
+          <main id="main" className={conn.online ? "content" : "content stale"} aria-busy={!conn.online}>
             <Routes>
               <Route path="/" element={<Overview />} />
               <Route path="/proposals" element={<Proposals />} />

@@ -41,6 +41,7 @@ export function createApi(
   getToken: () => string | null,
   onUnauthorized: () => void,
   fetchImpl: typeof fetch = (...a) => fetch(...a),
+  onStatus: (status: number) => void = () => {},
 ): Api {
   async function call<T>(method: string, path: string, query?: Query, body?: unknown): Promise<T> {
     const qs = new URLSearchParams();
@@ -59,8 +60,10 @@ export function createApi(
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
       });
     } catch {
+      onStatus(0);
       throw new ApiError(0, "the OPLIA API could not be reached");
     }
+    onStatus(res.status);
     const text = await res.text();
     let parsed: unknown = undefined;
     if (text) {

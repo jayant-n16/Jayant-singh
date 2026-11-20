@@ -169,3 +169,12 @@ fieldset { border: 0; padding: 0; margin: 0.6rem 0; }
 .dialog h2 { margin-top: 0; }
 .dialog-desc { margin-bottom: 0.5rem; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+
+.conn-banner {
+  position: sticky; top: 0; z-index: 15;
+  background: var(--danger-bg); color: var(--fg); border-bottom: 2px solid var(--danger);
+  padding: 0.6rem max(16px, env(safe-area-inset-left, 0px));
+  display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;
+}
+.content.stale { opacity: 0.55; filter: grayscale(0.6); }
+.content.stale .stats dd::after { content: " (stale)"; font-size: 0.8rem; font-weight: 400; color: var(--danger); }

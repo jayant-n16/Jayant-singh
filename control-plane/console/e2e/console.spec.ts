@@ -116,3 +116,16 @@ test("deep link survives sign-in and an unknown route shows not found", async ({
   await page.goto("/no-such-page");
   await expect(page.getByRole("heading", { name: "Not found" })).toBeVisible();
 });
+
+test("losing the API shows a banner and greys out the data; it clears when the API is back", async ({ page }) => {
+  await signIn(page, "carol");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await page.route("**/api/**", (route) => route.abort("connectionrefused"));
+  await page.getByRole("link", { name: "Proposals" }).click();
+  await expect(page.locator(".conn-banner")).toContainText("Connection to the OPLIA API lost — data on screen may be out of date");
+  await expect(page.locator("main.content")).toHaveClass(/stale/);
+  await page.unroute("**/api/**");
+  await page.getByRole("button", { name: "Retry now" }).click();
+  await expect(page.locator(".conn-banner")).toHaveCount(0);
+  await expect(page.locator("main.content")).not.toHaveClass(/stale/);
+});
