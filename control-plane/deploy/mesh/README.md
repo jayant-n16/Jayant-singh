@@ -7,6 +7,7 @@ Cross-cloud traffic between meshes rides the private interconnects (Equinix Fabr
 | | Consul (`consul/`) | Linkerd (`linkerd/`) |
 |---|---|---|
 | Chart (pinned) | `hashicorp/consul` **2.1.0** from `https://helm.releases.hashicorp.com` | `linkerd-edge/linkerd-crds`, `linkerd-control-plane`, `linkerd-multicluster` **2026.10.2** (edge-26.10.2) from `https://helm.linkerd.io/edge` |
+| Kubernetes | 1.30+ (validated at 1.30) | **1.31+** — the chart declares `kubeVersion: >=1.31.0-0` and refuses older clusters (found by CI) |
 | Cross-cluster model | cluster peering through mesh gateways | multicluster `Link` with gateways (or flat network / federated) |
 | mTLS | built-in CA, `ProxyDefaults` + default-deny `ServiceIntentions` | identity issuer from your trust anchor (generate in Vault PKI, never commit keys) |
 | OPLIA status | `GET /network/status` reads `/v1/peerings` from `OPLIA_CONSUL_ADDR` | `GET /network/status` reads `Link` resources (multicluster.linkerd.io) |

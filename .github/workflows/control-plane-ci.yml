@@ -292,6 +292,9 @@ jobs:
           # definitions. Our own custom resources are validated against them (validate-crs.py).
           kc() { kubeconform -strict -summary -kubernetes-version 1.30.0 -skip CustomResourceDefinition "$@"; }
           ht() { helm template --kube-version 1.30.0 --api-versions policy/v1/PodDisruptionBudget "$@"; }
+          # Linkerd edge 2026.10.2 declares kubeVersion >=1.31.0, so it is rendered and checked for 1.31
+          kc131() { kubeconform -strict -summary -kubernetes-version 1.31.0 -skip CustomResourceDefinition "$@"; }
+          ht131() { helm template --kube-version 1.31.0 --api-versions policy/v1/PodDisruptionBudget "$@"; }
           helm repo add hashicorp https://helm.releases.hashicorp.com
           helm repo add linkerd-edge https://helm.linkerd.io/edge
           helm repo update
@@ -307,12 +310,12 @@ jobs:
           openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=identity.linkerd.cluster.local" -keyout "$t/issuer.key" -out "$t/issuer.csr"
           printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$t/ext"
           openssl x509 -req -in "$t/issuer.csr" -CA "$t/ca.crt" -CAkey "$t/ca.key" -CAcreateserial -days 1 -extfile "$t/ext" -out "$t/issuer.crt"
-          ht linkerd-crds linkerd-edge/linkerd-crds --version 2026.10.2 -n linkerd | kc -
-          ht linkerd-control-plane linkerd-edge/linkerd-control-plane --version 2026.10.2 -n linkerd \
+          ht131 linkerd-crds linkerd-edge/linkerd-crds --version 2026.10.2 -n linkerd | kc131 -
+          ht131 linkerd-control-plane linkerd-edge/linkerd-control-plane --version 2026.10.2 -n linkerd \
             -f mesh/linkerd/values.yaml --set-file identityTrustAnchorsPEM="$t/ca.crt" \
-            --set-file identity.issuer.tls.crtPEM="$t/issuer.crt" --set-file identity.issuer.tls.keyPEM="$t/issuer.key" | kc -
-          ht linkerd-multicluster linkerd-edge/linkerd-multicluster --version 2026.10.2 -n linkerd-multicluster \
-            -f mesh/linkerd/multicluster-values.yaml | kc -
+            --set-file identity.issuer.tls.crtPEM="$t/issuer.crt" --set-file identity.issuer.tls.keyPEM="$t/issuer.key" | kc131 -
+          ht131 linkerd-multicluster linkerd-edge/linkerd-multicluster --version 2026.10.2 -n linkerd-multicluster \
+            -f mesh/linkerd/multicluster-values.yaml | kc131 -
       - name: CDC connector configs are valid JSON
         run: for f in dr/cdc/*.json; do python3 -m json.tool "$f" > /dev/null; done
       - name: OTel sidecar config loads in the pinned collector (otelcol validate)
