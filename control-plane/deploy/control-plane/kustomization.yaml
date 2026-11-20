@@ -5,5 +5,6 @@ resources:
   - namespace.yaml
   - serviceaccount.yaml
   - api.yaml
+  - console.yaml
   - workers.yaml
   - cronjobs.yaml

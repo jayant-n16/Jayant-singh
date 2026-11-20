@@ -117,6 +117,85 @@ jobs:
       - name: Production build
         run: npx vite build
 
+  console-e2e:
+    # Browser tests against the real console image (non-root, read-only root filesystem),
+    # the API and the local dev login.
+    needs: console
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OPLIA_E2E_WEBHOOK_SECRET: ci-e2e-webhook-secret
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+      - name: Install the control plane
+        working-directory: control-plane
+        run: pip install -e .
+      - name: Install console dependencies and Chromium
+        working-directory: control-plane/console
+        run: |
+          npx -y npm@11.21.1 ci --no-fund --no-audit
+          npx playwright install --with-deps chromium
+      - name: Build the console image
+        working-directory: control-plane/console
+        run: docker build -t oplia-console:ci .
+      - name: Start dev login and API
+        working-directory: ${{ runner.temp }}
+        env:
+          OPLIA_ENVIRONMENT: dev
+        run: |
+          nohup oplia-dev-idp > idp.log 2>&1 &
+          OPLIA_DATABASE_URL="sqlite:///$RUNNER_TEMP/e2e.db" OPLIA_OIDC_ISSUER=http://127.0.0.1:8090/ \
+          OPLIA_OIDC_AUDIENCE=oplia-api OPLIA_OIDC_JWKS_URL=http://127.0.0.1:8090/jwks \
+          OPLIA_SECRET_WEBHOOK_HMAC_SECRET="$OPLIA_E2E_WEBHOOK_SECRET" \
+            nohup uvicorn oplia_ctl.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/healthz >/dev/null && curl -sf http://127.0.0.1:8090/jwks >/dev/null && exit 0
+            sleep 1
+          done
+          cat idp.log api.log; exit 1
+      - name: Start the console container (UID 1001, read-only root filesystem)
+        run: |
+          docker run -d --name oplia-console --network host --read-only --tmpfs /tmp --user 1001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -e OPLIA_CONSOLE_AUTHORITY=http://127.0.0.1:8090/ -e OPLIA_CONSOLE_ALLOW_HTTP_AUTHORITY=true \
+            -e OPLIA_CONSOLE_CLIENT_ID=oplia-console -e OPLIA_CONSOLE_API_UPSTREAM=http://127.0.0.1:8000 \
+            -e OPLIA_CONSOLE_ENVIRONMENT_LABEL="CI" oplia-console:ci
+          for i in $(seq 1 30); do curl -sf http://localhost:8080/healthz >/dev/null && break; sleep 1; done
+          docker logs oplia-console
+          curl -sf http://localhost:8080/config.json
+          curl -sf http://localhost:8080/api/healthz
+      - name: Console refuses unsafe settings
+        run: |
+          set +e
+          out=$(docker run --rm -e OPLIA_CONSOLE_AUTHORITY=http://idp.example.com/ -e OPLIA_CONSOLE_CLIENT_ID=c \
+                  -e OPLIA_CONSOLE_API_UPSTREAM=http://api oplia-console:ci 2>&1); rc=$?
+          echo "$out"
+          [ $rc -ne 0 ] && echo "$out" | grep -q "must be https://"
+      - name: Browser tests (Playwright)
+        working-directory: control-plane/console
+        env:
+          OPLIA_E2E_BASE_URL: http://localhost:8080
+        run: npx playwright test
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker logs oplia-console || true
+          cat "$RUNNER_TEMP/api.log" "$RUNNER_TEMP/idp.log" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: playwright-report
+          path: control-plane/console/playwright-report
+          retention-days: 7
+
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 20

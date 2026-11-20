@@ -40,7 +40,29 @@ sign in as `alice` (approver), `bob` (operator), `carol` (both) or `dave` (no ro
 
 ```bash
 npm run typecheck && npm test && npm run build
+npm run e2e        # browser tests; needs the stack running (console on :8080, API, dev login)
 ```
+
+## Container image
+
+`Dockerfile` builds the app and serves it with nginx (Red Hat UBI 9, UID 1001, read-only root
+filesystem supported; writes only to `/tmp`). Settings, validated at start-up (the container
+exits with a clear message on a bad value):
+
+| Variable | Required | Meaning |
+|---|---|---|
+| `OPLIA_CONSOLE_AUTHORITY` | yes | issuer URL of Entra ID / Okta; must be `https://` |
+| `OPLIA_CONSOLE_CLIENT_ID` | yes | the console's app registration / app integration ID |
+| `OPLIA_CONSOLE_SCOPE` | no | default `openid profile`; Entra also needs the API scope |
+| `OPLIA_CONSOLE_API_UPSTREAM` | yes | `http(s)://host[:port]` of the API (no path) |
+| `OPLIA_CONSOLE_ENVIRONMENT_LABEL` | no | header badge, e.g. `Production` |
+| `OPLIA_CONSOLE_ALLOW_HTTP_AUTHORITY` | no | `true` only for the local dev login |
+
+Responses carry a strict Content-Security-Policy (only this origin plus the identity provider's
+origin), `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` (OAuth codes never leak in
+referrers), HSTS, and `no-store` for everything except fingerprinted assets. Access logs omit
+query strings. Kubernetes manifests: `deploy/control-plane/console.yaml`; identity provider set-up:
+`docs/console-login.md`.
 
 Dependencies are pinned exactly; install with `npm@11.21.1 ci` (npm 10.9 fails to resolve vitest
 4's optional peers).
