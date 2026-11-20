@@ -69,9 +69,10 @@ def main(argv: list[str]) -> int:
                     failed += 1
                     continue
                 schema = dict(schemas[key])
-                # metadata is validated by the API server, not by the CRD schema
+                # apiVersion, kind and metadata are always accepted at the root by the API server
+                # (metadata is validated by it, not by the CRD schema), declared or not
                 props = dict(schema.get("properties", {}))
-                props["metadata"] = {"type": "object"}
+                props.update(apiVersion={"type": "string"}, kind={"type": "string"}, metadata={"type": "object"})
                 schema["properties"] = props
                 errors = sorted(Draft7Validator(_strict(schema)).iter_errors(doc), key=lambda e: list(e.path))
                 for err in errors:
