@@ -32,3 +32,25 @@ describe("databases", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/databases/new-db/check")).toBe(true));
   });
 });
+
+describe("DR consistency", () => {
+  it("shows drift with its proposal and runs a check", async () => {
+    const run = { id: "r1", pair: "dr-mysql", status: "DRIFT", summary: "1 table(s) with different data: products",
+      report: { source: "orders-pg", target: "dr-mysql", schema: [], lag_seconds: 2,
+        tables: { products: { source_rows: 150, target_rows: 150, match: false, checksum: "differ", rechecked: true } } },
+      triggered_by: "scheduler", proposal_id: "p-123456789", started_at: "2026-11-20T10:00:00+00:00", finished_at: "2026-11-20T10:00:05+00:00" };
+    const { api, calls } = fakeApi([
+      { method: "GET", path: "/databases", reply: [entry(), entry({ name: "dr-mysql", role: "dr", dr_of: "orders-pg" })] },
+      { method: "GET", path: "/databases/consistency", reply: [run] },
+      { method: "POST", path: "/databases/dr-mysql/consistency", reply: run },
+    ]);
+    const user = me({ features: { aiops: false, finops: false, jit: false, dr: false, databases: true, consistency: true } }, { approve: false, operate: true });
+    renderAt(<Databases />, { api, user, path: "/?tab=consistency" });
+    expect(await screen.findByText(/with different data: products/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "p-123456" })).toHaveAttribute("href", "/proposals/p-123456789");
+    await userEvent.click(screen.getByRole("button", { name: "Report" }));
+    expect(screen.getByText("differ (re-checked)")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Run check" }));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/databases/dr-mysql/consistency")).toBe(true));
+  });
+});

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -35,7 +36,9 @@ from oplia_ctl.cloud.k8s_isolation import K8sNamespaceIsolationExecutor
 from oplia_ctl.cloud.power import ComputePowerExecutor
 from oplia_ctl.config import Settings, get_settings
 from oplia_ctl.databases.config import DatabaseSettings
+from oplia_ctl.databases.consistency import ACTION_DR_RESYNC, ConsistencyChecker
 from oplia_ctl.databases.registry import DatabaseRegistry
+from oplia_ctl.databases.resync import ResyncExecutor
 from oplia_ctl.db import Base, make_engine, make_session_factory
 from oplia_ctl.dr.config import DRSettings, build_breaker
 from oplia_ctl.drivers.cicd import build_cicd_driver
@@ -129,6 +132,20 @@ def build(settings: Settings) -> FastAPI:
                             jwks_url=settings.oidc_jwks_url, roles_claim=settings.oidc_roles_claim)
     logging.getLogger("oplia").info("control plane starting: env=%s dry_run=%s require_approval=%s",
                                     settings.environment, settings.dry_run, settings.require_approval)
+    db_registry = (DatabaseRegistry(db_cfg.databases, secrets, make_session_factory(engine))
+                   if db_cfg.databases else None)
+    consistency = None
+    if db_registry is not None and any(d.dr_of for d in db_cfg.databases):
+        breaker_state = None
+        if dr_breaker is not None:
+            b = dr_breaker
+
+            def breaker_state() -> dict[str, Any] | None:
+                state, incident, decision = b.store.state(b.stream)
+                return {"stream": b.stream, "state": state, "incident_id": incident, "pending_decision": decision}
+        consistency = ConsistencyChecker(db_registry, gate, make_session_factory(engine),
+                                         breaker_state=breaker_state)
+        executors[ACTION_DR_RESYNC] = ResyncExecutor(db_registry)
     return create_app(
         gate=gate,
         secrets=secrets,
@@ -147,8 +164,8 @@ def build(settings: Settings) -> FastAPI:
         jit=jit,
         dr_breaker=dr_breaker,
         db_ping=sqlalchemy_ping(engine),
-        db_registry=(DatabaseRegistry(db_cfg.databases, secrets, make_session_factory(engine))
-                     if db_cfg.databases else None),
+        db_registry=db_registry,
+        consistency=consistency,
         inventory_sf=make_session_factory(engine) if (
             finops_cfg.aws_regions or finops_cfg.azure_subscriptions or finops_cfg.gcp_scopes
             or finops_cfg.ibm_account_id) else None,

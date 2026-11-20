@@ -2,7 +2,7 @@ export interface Me {
   subject: string;
   roles: string[];
   can: { approve: boolean; operate: boolean; read: boolean };
-  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean };
 }
 
 export type ProposalStatus =
@@ -206,4 +206,32 @@ export interface DatabaseEntry {
   dr_of: string | null;
   description: string;
   last_check: DbCheck | null;
+}
+
+export interface ConsistencyTable {
+  source_rows: number;
+  target_rows: number;
+  match: boolean;
+  checksum?: string;
+  rechecked?: boolean;
+}
+
+export interface ConsistencyRun {
+  id: string;
+  pair: string;
+  status: "CONSISTENT" | "DRIFT" | "FAILED";
+  summary: string;
+  report: {
+    source?: string;
+    target?: string;
+    schema?: { table: string; issue: string }[];
+    tables?: Record<string, ConsistencyTable>;
+    lag_seconds?: number | null;
+    dr_breaker?: { stream: string; state: string; incident_id: string | null };
+    error?: string;
+  };
+  triggered_by: string;
+  proposal_id: string | null;
+  started_at: string | null;
+  finished_at: string | null;
 }

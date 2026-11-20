@@ -53,6 +53,7 @@ oplia-iac-lifecycle = "oplia_ctl.lifecycle.manager:main"
 oplia-dev-idp = "oplia_ctl.devidp:main"
 oplia-inventory-scan = "oplia_ctl.inventory.scanner:main"
 oplia-db-health = "oplia_ctl.databases.config:health_main"
+oplia-db-consistency = "oplia_ctl.databases.config:consistency_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

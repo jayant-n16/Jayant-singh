@@ -19,6 +19,12 @@ GRANT SELECT ON performance_schema.* TO 'oplia_dr'@'127.0.0.1';
 CREATE DATABASE app;
 CREATE USER 'app'@'127.0.0.1' IDENTIFIED BY '$PW';
 GRANT ALL ON app.* TO 'app'@'127.0.0.1';
+CREATE DATABASE app_src;
+CREATE DATABASE app_dr;
+CREATE USER 'oplia_cc'@'127.0.0.1' IDENTIFIED BY '$PW';
+GRANT ALL ON app_src.* TO 'oplia_cc'@'127.0.0.1';
+GRANT ALL ON app_dr.* TO 'oplia_cc'@'127.0.0.1';
+GRANT REPLICATION CLIENT, REPLICATION_SLAVE_ADMIN ON *.* TO 'oplia_cc'@'127.0.0.1';
 SQL
 echo "export OPLIA_TEST_MYSQL_PORT=$PORT"
 echo "export OPLIA_TEST_MYSQL_PW=$PW"

@@ -1,4 +1,7 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router";
+
+import Consistency from "./Consistency";
 
 import { Badge, Empty, ErrorNote, JsonBlock, Loading, PageHeader, TableWrap, errorMessage } from "../components/ui";
 import { fmtTime } from "../format";
@@ -20,7 +23,29 @@ function lagOf(e: DatabaseEntry): string {
   return "—";
 }
 
-export default function Databases({ children }: { children?: React.ReactNode }) {
+export default function Databases() {
+  const { me } = useSession();
+  const [params, setParams] = useSearchParams();
+  const tab = params.get("tab") === "consistency" && me.features.consistency ? "consistency" : "health";
+  return (
+    <>
+      <PageHeader
+        title="Databases"
+        intro="Source and DR databases from configuration: health of each, and whether every DR copy matches its source."
+      />
+      <div className="tabs" role="tablist" aria-label="Database views">
+        <button role="tab" aria-selected={tab === "health"} className={tab === "health" ? "tab active" : "tab"} onClick={() => setParams({})}>Health</button>
+        {me.features.consistency ? (
+          <button role="tab" aria-selected={tab === "consistency"} className={tab === "consistency" ? "tab active" : "tab"}
+            onClick={() => setParams({ tab: "consistency" })}>DR consistency</button>
+        ) : null}
+      </div>
+      {tab === "consistency" ? <Consistency /> : <Health />}
+    </>
+  );
+}
+
+function Health() {
   const { api } = useSession();
   const list = useResource(() => api.get<DatabaseEntry[]>("/databases"), [api]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -42,11 +67,7 @@ export default function Databases({ children }: { children?: React.ReactNode }) 
 
   return (
     <>
-      <PageHeader
-        title="Databases"
-        intro="Source and DR databases from configuration, with their latest read-only health check (connection, version, role, read-only, replication lag)."
-        actions={<button className="btn" onClick={list.reload}>Refresh</button>}
-      />
+      <p className="muted">Latest read-only health check (connection, version, role, read-only, replication lag). <button className="btn btn-small" onClick={list.reload}>Refresh</button></p>
       <ErrorNote error={list.error} />
       {checkError ? <div className="note note-danger" role="alert">Check failed to run: {errorMessage(checkError)}</div> : null}
       {list.loading && !list.data ? <Loading what="databases" /> : null}
@@ -79,7 +100,6 @@ export default function Databases({ children }: { children?: React.ReactNode }) 
         </TableWrap>
       ) : null}
       {open && list.data ? (<><h2>Details: {open}</h2><JsonBlock value={list.data.find((d) => d.name === open)?.last_check?.detail} /></>) : null}
-      {children}
     </>
   );
 }

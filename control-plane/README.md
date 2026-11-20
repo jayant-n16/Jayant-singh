@@ -51,6 +51,21 @@ scrubbed of the DSN and password. `oplia-db-health` (CronJob, every 5 min) and `
 read-only flag and replication state/lag per engine. Console: **Databases**. Tested against real
 PostgreSQL 16 and MySQL 8 servers in CI; MongoDB and CockroachDB with fakes of their status commands.
 
+## DR consistency checks
+
+For every DR copy (`dr_of`), `oplia-db-consistency` (CronJob, hourly) and `POST /databases/{name}/consistency`
+compare source and copy read-only: schema (tables, columns, types, nullability; MongoDB collections and
+indexes), row/document counts, **chunked checksums** (keyset pagination by primary key; same-engine pairs;
+tables without a primary key or above `OPLIA_CONSISTENCY_CHECKSUM_MAX_ROWS` are compared by count only, and
+the report says so) and replication lag. A table that differs is re-checked once after
+`OPLIA_CONSISTENCY_RECHECK_DELAY_SECONDS` (the source keeps changing). If the DR breaker is OPEN the report
+says differences are expected and no proposal is raised. Otherwise data/schema drift raises a `dr.resync`
+proposal: PostgreSQL->PostgreSQL and MySQL->MySQL only; it refuses a read-only (locked) target and any
+schema difference, pauses replication into the copy, replaces each drifted table in one transaction and
+verifies the checksum before reporting success. Results: `GET /databases/consistency`, audit event
+`dr_consistency_check`, console **Databases -> DR consistency**. Tested against real PostgreSQL 16 and MySQL 8
+(drift, recheck, resync, locked target, schema drift); MongoDB with a fake driver.
+
 ## Try it locally with a login (development only)
 
 `oplia-dev-idp` is a local OIDC login (authorization code + PKCE) so the API - and the admin

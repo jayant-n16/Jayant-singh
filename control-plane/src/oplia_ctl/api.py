@@ -40,6 +40,8 @@ GET  /inventory/scans                 operator/approver: inventory scan history
 POST /inventory/instances/{id}/power  operator/approver: propose start/stop (compute.power, gated)
 GET  /databases                       operator/approver: configured databases with their last health check
 POST /databases/{name}/check          operator/approver: run a read-only health check now (audited)
+GET  /databases/consistency           operator/approver: DR consistency runs (?pair=)
+POST /databases/{name}/consistency    operator/approver: compare a DR copy with its source now (audited)
 """
 
 
@@ -60,6 +62,7 @@ from oplia_ctl.aiops.matrix import Alert
 from oplia_ctl.aiops.models import PredictionStatus
 from oplia_ctl.auth import AuthError, OIDCVerifier, Principal, verify_webhook
 from oplia_ctl.cloud.power import parse_target as parse_power_target
+from oplia_ctl.databases.consistency import ConsistencyChecker
 from oplia_ctl.databases.registry import DatabaseRegistry
 from oplia_ctl.dr.breaker import CircuitBreaker, list_incidents
 from oplia_ctl.finops.compliance import list_findings, list_scans
@@ -166,6 +169,7 @@ def create_app(
     db_ping: Callable[[], None] | None = None,
     inventory_sf: sessionmaker[Session] | None = None,
     db_registry: DatabaseRegistry | None = None,
+    consistency: ConsistencyChecker | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -489,6 +493,23 @@ def create_app(
                           detail={"database": name, "ok": result["ok"], "latency_ms": result["latency_ms"]})
         return result
 
+    def _consistency() -> ConsistencyChecker:
+        if consistency is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no DR database pairs configured")
+        return consistency
+
+    @app.get("/databases/consistency")
+    def consistency_runs(_: Annotated[Principal, Depends(reader)], pair: str | None = None,
+                         limit: int = 50) -> list[dict[str, Any]]:
+        return _consistency().list_runs(pair=pair, limit=limit)
+
+    @app.post("/databases/{name}/consistency")
+    def consistency_run(name: str, p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        checker = _consistency()
+        if name not in [dst.name for _src, dst in checker.pairs()]:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "not a configured DR copy (needs dr_of)")
+        return checker.run(name, triggered_by=p.subject)
+
     # ------------------------------------------------------------------ JIT
     def _jit() -> JitService:
         if jit is None:
@@ -613,6 +634,7 @@ def create_app(
                 "features": {"aiops": escalation is not None or aiops_engine is not None,
                              "finops": finops_sf is not None, "jit": jit is not None,
                              "inventory": inventory_sf is not None, "databases": db_registry is not None,
+                             "consistency": consistency is not None,
                              "dr": dr_breaker is not None}}
 
     @app.get("/kill-switch")
