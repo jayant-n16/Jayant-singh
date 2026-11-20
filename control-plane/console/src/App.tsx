@@ -12,6 +12,7 @@ import Databases from "./pages/Databases";
 import Dr from "./pages/Dr";
 import FinOps from "./pages/FinOps";
 import Infrastructure from "./pages/Infrastructure";
+import Integrations from "./pages/Integrations";
 import Jit from "./pages/Jit";
 import Overview from "./pages/Overview";
 import ProposalDetail from "./pages/ProposalDetail";
@@ -95,6 +96,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
             {m.features.finops ? <NavLink to="/finops">FinOps</NavLink> : null}
             {m.features.jit ? <NavLink to="/jit">JIT access</NavLink> : null}
             {m.features.aiops ? <NavLink to="/aiops">AIOps</NavLink> : null}
+            {m.features.integrations ? <NavLink to="/integrations">Integrations</NavLink> : null}
           </nav>
           <main id="main" className={conn.online ? "content" : "content stale"} aria-busy={!conn.online}>
             <Routes>
@@ -104,6 +106,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
               <Route path="/audit" element={<Audit />} />
               <Route path="/infrastructure" element={<Feature on={m.features.inventory === true} name="Infrastructure"><Infrastructure /></Feature>} />
               <Route path="/databases" element={<Feature on={m.features.databases === true} name="Databases"><Databases /></Feature>} />
+              <Route path="/integrations" element={<Feature on={m.features.integrations === true} name="Integrations"><Integrations /></Feature>} />
               <Route path="/dr" element={<Feature on={m.features.dr} name="DR circuit breaker"><Dr /></Feature>} />
               <Route path="/finops" element={<Feature on={m.features.finops} name="FinOps"><FinOps /></Feature>} />
               <Route path="/jit" element={<Feature on={m.features.jit} name="JIT access"><Jit /></Feature>} />

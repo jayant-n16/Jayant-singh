@@ -42,6 +42,8 @@ GET  /databases                       operator/approver: configured databases wi
 POST /databases/{name}/check          operator/approver: run a read-only health check now (audited)
 GET  /databases/consistency           operator/approver: DR consistency runs (?pair=)
 POST /databases/{name}/consistency    operator/approver: compare a DR copy with its source now (audited)
+GET  /integrations                    operator/approver: status of clouds, CI/CD, IdPs, alerting, Vault (no secrets)
+POST /integrations/{name}/test        approver: send a test notification (Slack, PagerDuty, SIEM; audited)
 """
 
 
@@ -68,6 +70,7 @@ from oplia_ctl.dr.breaker import CircuitBreaker, list_incidents
 from oplia_ctl.finops.compliance import list_findings, list_scans
 from oplia_ctl.finops.optimizer import MaintenanceWindowClosedError, list_candidates
 from oplia_ctl.identity.jit import JitConflictError, JitRequestError, JitService
+from oplia_ctl.integrations import IntegrationRegistry
 from oplia_ctl.inventory.scanner import list_instances as list_inventory_instances
 from oplia_ctl.inventory.scanner import list_scans as list_inventory_scans
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
@@ -170,6 +173,7 @@ def create_app(
     inventory_sf: sessionmaker[Session] | None = None,
     db_registry: DatabaseRegistry | None = None,
     consistency: ConsistencyChecker | None = None,
+    integrations: IntegrationRegistry | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -510,6 +514,32 @@ def create_app(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "not a configured DR copy (needs dr_of)")
         return checker.run(name, triggered_by=p.subject)
 
+    # ---------------------------------------------------------- integrations
+    def _integrations() -> IntegrationRegistry:
+        if integrations is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "integration status not available")
+        return integrations
+
+    @app.get("/integrations")
+    def integrations_status(_: Annotated[Principal, Depends(reader)]) -> list[dict[str, Any]]:
+        return _integrations().status()
+
+    @app.post("/integrations/{name}/test")
+    def integrations_test(name: str, p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        reg = _integrations()
+        try:
+            detail = reg.send_test(name, p.subject)
+            ok, error = True, None
+        except LookupError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown integration") from None
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+        except Exception as exc:  # the failure is the answer: report and audit it
+            ok, detail, error = False, "", f"{type(exc).__name__}: {str(exc)[:300]}"
+        gate.record_event(actor=p.subject, event="integration_test_notification",
+                          detail={"integration": name, "ok": ok, "error": error})
+        return {"integration": name, "ok": ok, "detail": detail, "error": error}
+
     # ------------------------------------------------------------------ JIT
     def _jit() -> JitService:
         if jit is None:
@@ -634,7 +664,7 @@ def create_app(
                 "features": {"aiops": escalation is not None or aiops_engine is not None,
                              "finops": finops_sf is not None, "jit": jit is not None,
                              "inventory": inventory_sf is not None, "databases": db_registry is not None,
-                             "consistency": consistency is not None,
+                             "consistency": consistency is not None, "integrations": integrations is not None,
                              "dr": dr_breaker is not None}}
 
     @app.get("/kill-switch")

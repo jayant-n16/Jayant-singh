@@ -2,7 +2,7 @@ export interface Me {
   subject: string;
   roles: string[];
   can: { approve: boolean; operate: boolean; read: boolean };
-  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean; integrations?: boolean };
 }
 
 export type ProposalStatus =
@@ -234,4 +234,16 @@ export interface ConsistencyRun {
   proposal_id: string | null;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface IntegrationStatus {
+  name: string;
+  category: "cloud" | "cicd" | "identity" | "alerting" | "secrets" | "sign-in";
+  target: string;
+  secrets: string[];
+  status: "ok" | "configured" | "error" | "not_configured";
+  detail: string;
+  can_test_notification: boolean;
+  checked_at: string;
+  latency_ms: number;
 }

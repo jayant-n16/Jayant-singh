@@ -324,6 +324,19 @@ uvicorn oplia_ctl.main:app --port 8080         # terminal 2
   stop thresholds (5xx > 0.01 %, crash loops, replication lag > 2 s, Vault p99 > 50 ms) and rollback.
 * Settings: `examples/vault/vault.env.example`.
 
+## Integrations status
+
+`GET /integrations` (operator or approver) contacts each configured connection once and reports
+`ok`, `configured` (secret present but no safe read-only probe), `error` (with the scrubbed error) or
+`not_configured`. Secret *names* are listed; secret values are never returned or logged.
+Covered: AWS (STS), Azure, GCP, IBM Cloud, GitHub, GitLab, Jenkins, console OIDC sign-in (JWKS),
+Entra ID, Okta, Active Directory, Slack, PagerDuty, SIEM and Vault.
+
+`POST /integrations/{name}/test` (approver only) sends one labelled test notification to Slack,
+PagerDuty (an info-severity event that is resolved immediately with the same dedup key) or the SIEM
+sink, and is recorded in the audit log as `integration_test_notification`. The console screen is
+"Integrations". Validated with respx/fakes only; not run against real Slack, PagerDuty or cloud accounts.
+
 ## API
 
 | Method | Path | Auth |

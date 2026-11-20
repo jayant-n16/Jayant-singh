@@ -48,6 +48,7 @@ from oplia_ctl.http import ResilientClient
 from oplia_ctl.identity.config import IdentitySettings, build_providers
 from oplia_ctl.identity.jit import JitService, load_catalog
 from oplia_ctl.identity.sweep import ACTION_DISABLE_INACTIVE, DisableInactiveExecutor
+from oplia_ctl.integrations import build_integrations
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
 from oplia_ctl.safety import Executor, SafetyGate
@@ -123,11 +124,16 @@ def build(settings: Settings) -> FastAPI:
             K8sRunbookJobExecutor(runbooks), notifier, require_delivery=req)
     soar_cfg = SOARSettings()
     soar_exporter = None
+    sink = None
     if soar_cfg.siem_endpoint:
         sink = SIEMSink(endpoint=soar_cfg.siem_endpoint, fmt=soar_cfg.siem_format,
                         token_secret=soar_cfg.siem_token_secret, secrets=secrets, client=client,
                         dead_letter_path=soar_cfg.dead_letter_path)
         soar_exporter = SOARExporter(gate=gate, sink=sink, threshold=soar_cfg.threshold)
+    integrations = build_integrations(
+        settings=settings, secrets=secrets, client=client, finops_cfg=finops_cfg, providers=providers,
+        identity_cfg=identity_cfg, aiops_cfg=aiops_cfg, soar_cfg=soar_cfg, siem_sink=sink,
+        alerting_in_use=bool(aiops_cfg.cluster_name or dr_cfg.stream))
     verifier = OIDCVerifier(issuer=settings.oidc_issuer, audience=settings.oidc_audience,
                             jwks_url=settings.oidc_jwks_url, roles_claim=settings.oidc_roles_claim)
     logging.getLogger("oplia").info("control plane starting: env=%s dry_run=%s require_approval=%s",
@@ -166,6 +172,7 @@ def build(settings: Settings) -> FastAPI:
         db_ping=sqlalchemy_ping(engine),
         db_registry=db_registry,
         consistency=consistency,
+        integrations=integrations,
         inventory_sf=make_session_factory(engine) if (
             finops_cfg.aws_regions or finops_cfg.azure_subscriptions or finops_cfg.gcp_scopes
             or finops_cfg.ibm_account_id) else None,
