@@ -1,0 +1,40 @@
+# hashicorp/consul chart 2.1.0
+global:
+  name: consul
+  datacenter: dc1            # override per cluster: --set global.datacenter=<cloud-region>
+  peering:
+    enabled: true
+  tls:
+    enabled: true
+    enableAutoEncrypt: true
+    verify: true
+    httpsOnly: true
+  acls:
+    manageSystemACLs: true
+  gossipEncryption:
+    autoGenerate: true
+  metrics:
+    enabled: true
+    enableAgentMetrics: true
+server:
+  replicas: 3
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits: { cpu: "1", memory: "1Gi" }
+connectInject:
+  enabled: true
+  default: false             # opt-in per namespace/pod with consul.hashicorp.com/connect-inject
+meshGateway:
+  enabled: true
+  replicas: 2
+  service:
+    type: LoadBalancer
+    annotations:
+      # internal LB: peering traffic stays on the private interconnect
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+      networking.gke.io/load-balancer-type: Internal
+ui:
+  enabled: true
+  service:
+    type: ClusterIP

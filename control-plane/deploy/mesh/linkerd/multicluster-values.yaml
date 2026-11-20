@@ -1,0 +1,9 @@
+# linkerd-edge/linkerd-multicluster 2026.10.2
+gateway:
+  enabled: true
+  replicas: 2
+  serviceType: LoadBalancer
+  serviceAnnotations:
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+    networking.gke.io/load-balancer-type: Internal
