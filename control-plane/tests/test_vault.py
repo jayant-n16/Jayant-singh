@@ -305,7 +305,7 @@ def _jwt(claims: dict) -> str:
 @needs_vault
 def test_real_kubernetes_auth_login(bao, tmp_path):
     """Vault calls our TLS TokenReview endpoint; the role's SA/namespace binding is enforced."""
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",  # noqa: S603, S607
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",  # noqa: S607
                     "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
                     "-keyout", str(tmp_path / "k.pem"), "-out", str(tmp_path / "c.pem")], check=True,
                    capture_output=True)

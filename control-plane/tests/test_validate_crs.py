@@ -36,7 +36,7 @@ spec:
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([sys.executable, *args], capture_output=True, text=True, check=False)  # noqa: S603  # nosec B603
+    return subprocess.run([sys.executable, *args], capture_output=True, text=True, check=False)  # nosec B603
 
 
 def _write(tmp: Path, name: str, text: str) -> str:

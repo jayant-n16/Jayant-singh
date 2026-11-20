@@ -14,6 +14,7 @@ import FinOps from "./pages/FinOps";
 import Infrastructure from "./pages/Infrastructure";
 import Integrations from "./pages/Integrations";
 import Network from "./pages/Network";
+import Replication from "./pages/Replication";
 import Jit from "./pages/Jit";
 import Overview from "./pages/Overview";
 import ProposalDetail from "./pages/ProposalDetail";
@@ -98,6 +99,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
             {m.features.jit ? <NavLink to="/jit">JIT access</NavLink> : null}
             {m.features.aiops ? <NavLink to="/aiops">AIOps</NavLink> : null}
             {m.features.network ? <NavLink to="/network">Network</NavLink> : null}
+            {m.features.replication ? <NavLink to="/replication">DR replication</NavLink> : null}
             {m.features.integrations ? <NavLink to="/integrations">Integrations</NavLink> : null}
           </nav>
           <main id="main" className={conn.online ? "content" : "content stale"} aria-busy={!conn.online}>
@@ -108,6 +110,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
               <Route path="/audit" element={<Audit />} />
               <Route path="/infrastructure" element={<Feature on={m.features.inventory === true} name="Infrastructure"><Infrastructure /></Feature>} />
               <Route path="/databases" element={<Feature on={m.features.databases === true} name="Databases"><Databases /></Feature>} />
+              <Route path="/replication" element={<Feature on={m.features.replication === true} name="DR replication"><Replication /></Feature>} />
               <Route path="/network" element={<Feature on={m.features.network === true} name="Network"><Network /></Feature>} />
               <Route path="/integrations" element={<Feature on={m.features.integrations === true} name="Integrations"><Integrations /></Feature>} />
               <Route path="/dr" element={<Feature on={m.features.dr} name="DR circuit breaker"><Dr /></Feature>} />

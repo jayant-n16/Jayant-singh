@@ -14,7 +14,8 @@ import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models
 import oplia_ctl.inventory.models
-import oplia_ctl.network.models  # noqa: F401
+import oplia_ctl.network.models
+import oplia_ctl.replication.models  # noqa: F401
 from oplia_ctl.aiops.config import AIOpsSettings, build_notifier, build_scheduler
 from oplia_ctl.aiops.engine import AIOpsEngine
 from oplia_ctl.aiops.escalation import EscalationScheduler
@@ -53,6 +54,11 @@ from oplia_ctl.integrations import build_integrations
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
 from oplia_ctl.network.service import NetworkService, NetworkSettings, TrafficDialExecutor
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
+from oplia_ctl.replication.config import ACTION_PIPELINE, ReplicationSettings
+from oplia_ctl.replication.images import ACTION_IMAGE_REPLICATE, ImageReplicator
+from oplia_ctl.replication.objects import ACTION_OBJECT_SYNC, ObjectReplicator
+from oplia_ctl.replication.pipelines import KafkaConnect, PipelineExecutor
+from oplia_ctl.replication.stores import build_store
 from oplia_ctl.safety import Executor, SafetyGate
 from oplia_ctl.secrets import build_secret_provider
 from oplia_ctl.soar.exporter import SOARExporter, SOARSettings
@@ -137,6 +143,19 @@ def build(settings: Settings) -> FastAPI:
                if net_cfg.enabled() else None)
     if network is not None and net_cfg.endpoint_groups:
         executors["network.traffic_dial"] = TrafficDialExecutor(network)
+    rep_cfg = ReplicationSettings()
+    kafka_connect = (KafkaConnect(rep_cfg.kafka_connect_url, client, secrets, rep_cfg.kafka_connect_auth_secret)
+                     if rep_cfg.kafka_connect_url else None)
+    object_replicator = (ObjectReplicator(rep_cfg.object_pairs, make_session_factory(engine), build_store,
+                                          rep_cfg.max_objects_per_run, rep_cfg.verify_readback)
+                         if rep_cfg.object_pairs else None)
+    image_replicator = ImageReplicator(rep_cfg.images, make_session_factory(engine)) if rep_cfg.images else None
+    if kafka_connect is not None:
+        executors[ACTION_PIPELINE] = PipelineExecutor(kafka_connect)
+    if object_replicator is not None:
+        executors[ACTION_OBJECT_SYNC] = object_replicator
+    if image_replicator is not None:
+        executors[ACTION_IMAGE_REPLICATE] = image_replicator
     integrations = build_integrations(
         settings=settings, secrets=secrets, client=client, finops_cfg=finops_cfg, providers=providers,
         identity_cfg=identity_cfg, aiops_cfg=aiops_cfg, soar_cfg=soar_cfg, siem_sink=sink,
@@ -181,6 +200,9 @@ def build(settings: Settings) -> FastAPI:
         consistency=consistency,
         integrations=integrations,
         network=network,
+        kafka_connect=kafka_connect,
+        object_replicator=object_replicator,
+        image_replicator=image_replicator,
         inventory_sf=make_session_factory(engine) if (
             finops_cfg.aws_regions or finops_cfg.azure_subscriptions or finops_cfg.gcp_scopes
             or finops_cfg.ibm_account_id) else None,

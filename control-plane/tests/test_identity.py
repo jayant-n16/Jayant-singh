@@ -409,7 +409,7 @@ def test_real_ldap_rejects_bad_password_and_untrusted_certificate(tmp_path):
     other_ca = tmp_path / "other.crt"
     argv = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=x",
             "-keyout", str(tmp_path / "k"), "-out", str(other_ca)]
-    subprocess.run(argv, check=True, capture_output=True)  # noqa: S603 - fixed argv, test-only certificate
+    subprocess.run(argv, check=True, capture_output=True)
     with pytest.raises(ldap.SERVER_DOWN):
         slapd(ca=str(other_ca)).has_access(SLAPD_GROUP, "bob")
 

@@ -46,6 +46,11 @@ GET  /integrations                    operator/approver: status of clouds, CI/CD
 POST /integrations/{name}/test        approver: send a test notification (Slack, PagerDuty, SIEM; audited)
 GET  /network/status                  operator/approver: Global Accelerator, Direct Connect, Consul, Linkerd
 POST /network/endpoint-groups/{key}/traffic-dial   operator/approver: propose a traffic-dial change (gated)
+GET  /dr/replication                  operator/approver: CDC pipelines, object pairs, image jobs
+POST /dr/replication/pipelines/{name}/{action}     propose pause/resume/restart of a CDC connector (gated)
+POST /dr/replication/objects/{pair}/plan           propose an incremental object sync (gated)
+POST /dr/replication/images                        propose a VM image replication (gated, worker runs it)
+POST /dr/replication/tags/preview                  how tags map to aws/azure/gcp (no side effects)
 """
 
 
@@ -78,6 +83,12 @@ from oplia_ctl.inventory.scanner import list_instances as list_inventory_instanc
 from oplia_ctl.inventory.scanner import list_scans as list_inventory_scans
 from oplia_ctl.network.service import NetworkService
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
+from oplia_ctl.replication.config import ACTION_PIPELINE
+from oplia_ctl.replication.images import ACTION_IMAGE_REPLICATE, ImageReplicator, validate_request
+from oplia_ctl.replication.objects import ACTION_OBJECT_SYNC, ObjectReplicator
+from oplia_ctl.replication.pipelines import ACTIONS as PIPELINE_ACTIONS
+from oplia_ctl.replication.pipelines import KafkaConnect
+from oplia_ctl.replication.tags import map_tags
 from oplia_ctl.safety import (
     Executor,
     ExpiredError,
@@ -123,6 +134,26 @@ class DecisionBody(BaseModel):
 
 ACTION_COMPUTE_POWER = "compute.power"
 ACTION_TRAFFIC_DIAL = "network.traffic_dial"
+
+
+class ImageReplicateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_cloud: Literal["aws", "azure", "gcp"]
+    source_id: str = Field(min_length=3, max_length=512)
+    target_cloud: Literal["aws", "azure", "gcp"]
+    name: str = Field(min_length=2, max_length=63)
+    reason: str = Field(min_length=5, max_length=2000)
+
+
+class ReasonBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=5, max_length=2000)
+
+
+class TagPreviewBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tags: dict[str, str] = Field(max_length=500)
+    target: Literal["aws", "azure", "gcp"]
 
 
 class TrafficDialBody(BaseModel):
@@ -186,6 +217,9 @@ def create_app(
     consistency: ConsistencyChecker | None = None,
     integrations: IntegrationRegistry | None = None,
     network: NetworkService | None = None,
+    kafka_connect: KafkaConnect | None = None,
+    object_replicator: ObjectReplicator | None = None,
+    image_replicator: ImageReplicator | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -585,6 +619,87 @@ def create_app(
             requested_by=p.subject)
         return _proposal_json(proposal)
 
+    # ---------------------------------------------------------- replication
+    replication_on = kafka_connect is not None or object_replicator is not None or image_replicator is not None
+
+    @app.get("/dr/replication")
+    def replication_status(_: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        if not replication_on:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                                "replication not configured (OPLIA_REPLICATION_*)")
+        pipes: dict[str, Any] = {"configured": kafka_connect is not None, "ok": True, "items": [],
+                                 "error": None}
+        if kafka_connect is not None:
+            try:
+                pipes["items"] = kafka_connect.connectors()
+            except Exception as exc:  # reported, never hides the other sections
+                pipes.update(ok=False, error=f"{type(exc).__name__}: {str(exc)[:300]}")
+        img_cfg = image_replicator.cfg if image_replicator else None
+        return {"pipelines": pipes,
+                "object_pairs": object_replicator.status() if object_replicator else [],
+                "image_jobs": image_replicator.jobs() if image_replicator else [],
+                "image_targets": {c: bool(img_cfg and getattr(img_cfg, c)) for c in ("aws", "azure", "gcp")}}
+
+    @app.post("/dr/replication/pipelines/{name}/{action}", status_code=status.HTTP_201_CREATED)
+    def replication_pipeline(name: str, action: str, body: ReasonBody,
+                             p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        if kafka_connect is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Kafka Connect not configured")
+        if action not in PIPELINE_ACTIONS:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"action must be one of {PIPELINE_ACTIONS}")
+        try:
+            names = {c["name"] for c in kafka_connect.connectors()}
+        except Exception as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Kafka Connect: {type(exc).__name__}") from None
+        if name not in names:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown connector")
+        proposal = gate.propose(action_type=ACTION_PIPELINE, target=name,
+                                payload={"connector": name, "action": action},
+                                reason=f"{action} CDC connector {name}: {body.reason}"[:2000],
+                                requested_by=p.subject)
+        return _proposal_json(proposal)
+
+    @app.post("/dr/replication/objects/{pair}/plan", status_code=status.HTTP_201_CREATED)
+    def replication_object_plan(pair: str, body: ReasonBody,
+                                p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        if object_replicator is None or pair not in object_replicator.pairs:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown object replication pair")
+        try:
+            plan = object_replicator.plan(pair)
+        except Exception as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                                f"could not list the source: {type(exc).__name__}: {str(exc)[:300]}") from None
+        if not plan["objects"]:
+            raise HTTPException(status.HTTP_409_CONFLICT, "nothing to copy: the target is up to date")
+        proposal = gate.propose(action_type=ACTION_OBJECT_SYNC, target=pair,
+                                payload={"pair": pair, "objects": plan["objects"]},
+                                reason=(f"DR object sync {pair}: {len(plan['objects'])} object(s), "
+                                        f"{plan['bytes']} bytes"
+                                        f"{' (truncated, more next run)' if plan['truncated'] else ''}"
+                                        f": {body.reason}")[:2000],
+                                requested_by=p.subject)
+        return {**_proposal_json(proposal), "plan": {k: plan[k] for k in ("bytes", "truncated", "missing_at_source")}}
+
+    @app.post("/dr/replication/images", status_code=status.HTTP_201_CREATED)
+    def replication_image(body: ImageReplicateBody, p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        if image_replicator is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "image replication not configured")
+        try:
+            validate_request(body.source_cloud, body.source_id, body.target_cloud, body.name, image_replicator.cfg)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
+        payload = {"source_cloud": body.source_cloud, "source_id": body.source_id,
+                   "target_cloud": body.target_cloud, "name": body.name, "requested_by": p.subject}
+        proposal = gate.propose(action_type=ACTION_IMAGE_REPLICATE, target=body.source_id, payload=payload,
+                                reason=(f"replicate {body.source_cloud} image to {body.target_cloud}: "
+                                        f"{body.reason}")[:2000],
+                                requested_by=p.subject)
+        return _proposal_json(proposal)
+
+    @app.post("/dr/replication/tags/preview")
+    def replication_tag_preview(body: TagPreviewBody, _: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        return map_tags(body.tags, body.target).__dict__
+
     # ------------------------------------------------------------------ JIT
     def _jit() -> JitService:
         if jit is None:
@@ -710,7 +825,7 @@ def create_app(
                              "finops": finops_sf is not None, "jit": jit is not None,
                              "inventory": inventory_sf is not None, "databases": db_registry is not None,
                              "consistency": consistency is not None, "integrations": integrations is not None,
-                             "network": network is not None,
+                             "network": network is not None, "replication": replication_on,
                              "dr": dr_breaker is not None}}
 
     @app.get("/kill-switch")

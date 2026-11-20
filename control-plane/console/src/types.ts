@@ -2,7 +2,7 @@ export interface Me {
   subject: string;
   roles: string[];
   can: { approve: boolean; operate: boolean; read: boolean };
-  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean; integrations?: boolean; network?: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean; integrations?: boolean; network?: boolean; replication?: boolean };
 }
 
 export type ProposalStatus =
@@ -268,3 +268,17 @@ export interface NetworkStatus {
   dial_history: { group: string; from: number; to: number; executed_at: string; request_id: string | null }[];
   policy: { max_increase: number; min_hold_minutes: number };
 }
+
+export interface Connector { name: string; type: string; class: string; state: string; worker: string; failed_tasks: number; tasks: { id: number; state: string; trace: string }[] }
+export interface ObjectPairStatus {
+  pair: string; source: string; target: string; target_key: string | null; replicated_objects: number;
+  last_run: null | { status: string; started_at: string; copied: number; bytes: number; summary: { skipped: { key: string; reason: string }[]; failed: { key: string; error: string }[] } };
+}
+export interface ImageJob { id: string; source_cloud: string; source_id: string; target_cloud: string; name: string; status: string; step: string; error: string | null; created_at: string; updated_at: string; state: Record<string, unknown> }
+export interface ReplicationStatus {
+  pipelines: { configured: boolean; ok: boolean; items: Connector[]; error: string | null };
+  object_pairs: ObjectPairStatus[];
+  image_jobs: ImageJob[];
+  image_targets: { aws: boolean; azure: boolean; gcp: boolean };
+}
+export interface TagMap { tags: Record<string, string>; changes: string[]; dropped: string[] }

@@ -41,7 +41,7 @@ jobs:
       - name: System packages (python-ldap build headers, OpenLDAP for AD-driver integration tests)
         run: |
           sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q libldap-dev libsasl2-dev slapd ldap-utils shellcheck
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q libldap-dev libsasl2-dev slapd ldap-utils shellcheck qemu-utils
           sudo systemctl stop slapd || true
           # the packaged AppArmor profile only allows slapd's default paths; the test server runs from RUNNER_TEMP
           if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true; fi

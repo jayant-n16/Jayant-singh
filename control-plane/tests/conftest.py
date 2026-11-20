@@ -57,6 +57,7 @@ def session_factory(tmp_path, _pg_engine) -> Iterator[sessionmaker[Session]]:
                               "finops_compliance_scans, finops_compliance_findings, finops_optimization_candidates, "
                               "jit_access_requests, dr_breaker_state, dr_incidents, "
                               "db_health_checks, db_consistency_runs, network_dial_changes, "
+                              "dr_object_manifest, dr_replication_runs, dr_image_jobs, "
                               "inventory_instances, inventory_scans "
                               "RESTART IDENTITY"))
         yield make_session_factory(_pg_engine)
