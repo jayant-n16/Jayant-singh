@@ -10,6 +10,7 @@ them are skipped if the tool is missing; CI installs both). Nothing talks to a r
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -392,10 +393,26 @@ class MemContainer:
         return SimpleNamespace(chunks=lambda: (d[i : i + 1_000_000] for i in range(0, len(d), 1_000_000)))
 
 
+class RangeContainer:
+    """Source container for blob VHDs: properties + ranged downloads, like azure-storage-blob."""
+
+    def __init__(self):
+        self.data, self.reads = {}, []
+
+    def get_blob_client(self, name):
+        return SimpleNamespace(get_blob_properties=lambda: SimpleNamespace(size=len(self.data[name])))
+
+    def download_blob(self, name, offset=None, length=None):
+        self.reads.append((name, offset, length))
+        d = self.data[name][offset : offset + length]
+        return SimpleNamespace(readall=lambda: d)
+
+
 class Clients:
     def __init__(self, ec2=None, s3=None, vhd=b""):
         self._ec2, self._s3, self.vhd = ec2, s3, vhd
         self.container, self.bucket = MemContainer(), MemBucket()
+        self.source_container = RangeContainer()
         self.created, self.revoked, self.granted, self.inserted = [], [], [], []
         self.gcp_status = ["PENDING", "READY"]
         outer = self
@@ -439,6 +456,9 @@ class Clients:
         return self.compute
 
     def azure_container(self, url, container):
+        if url == "https://srcacct.blob.core.windows.net":
+            assert container == "vhds"
+            return self.source_container
         return self.container
 
     def gcs_bucket(self, name):
@@ -680,6 +700,57 @@ def test_azure_snapshot_to_gcp_strips_footer(session_factory):
     assert rep.jobs()[0]["status"] == "SUCCEEDED", rep.jobs()[0]["error"]
     with gzip.open(io.BytesIO(staged["data"])) as gz, tarfile.open(fileobj=gz) as t:
         assert t.extractfile("disk.raw").read() == raw  # no footer, no padding
+
+
+BLOB_CFG = CFG.model_copy(update={"azure_source_accounts": ["srcacct"]})
+
+
+@mock_aws
+def test_azure_blob_dynamic_vhd_to_gcp_matches_qemu(session_factory, tmp_path):
+    if QEMU is None:
+        raise RuntimeError("qemu-img is required (apt-get install qemu-utils)")
+    raw = bytearray(5 * 1024 * 1024)
+    raw[100:4100] = os.urandom(4000)
+    raw[3 * 1024 * 1024 : 3 * 1024 * 1024 + 700] = os.urandom(700)
+    (tmp_path / "s.raw").write_bytes(raw)
+    subprocess.run([QEMU, "convert", "-f", "raw", "-O", "vpc", "-o", "subformat=dynamic",
+                    str(tmp_path / "s.raw"), str(tmp_path / "d.vhd")], check=True)
+    subprocess.run([QEMU, "convert", "-f", "vpc", "-O", "raw", str(tmp_path / "d.vhd"), str(tmp_path / "q.raw")],
+                   check=True)
+    expected = (tmp_path / "q.raw").read_bytes()
+    c = Clients()
+    c.source_container.data["vms/web.vhd"] = (tmp_path / "d.vhd").read_bytes()
+    c.gcp_status = ["READY"]
+    rep = ImageReplicator(BLOB_CFG, session_factory, c)
+    _queue(rep, "azure", "https://srcacct.blob.core.windows.net/vhds/vms/web.vhd", "gcp")
+    staged = {}
+    orig_delete = MemBlob.delete
+
+    def keep(self):
+        staged["data"] = self.b.data[self.name]
+        orig_delete(self)
+
+    MemBlob.delete = keep
+    try:
+        rep.run_pending()
+    finally:
+        MemBlob.delete = orig_delete
+    job = rep.jobs()[0]
+    assert job["status"] == "SUCCEEDED", job["error"]
+    assert job["state"]["source_disk_type"] == "dynamic" and c.granted == [] and c.revoked == []
+    assert job["state"]["sha256"] == hashlib.sha256(expected).hexdigest()
+    with gzip.open(io.BytesIO(staged["data"])) as gz, tarfile.open(fileobj=gz) as t:
+        assert t.extractfile("disk.raw").read() == expected
+
+
+def test_azure_blob_source_must_be_allowlisted(session_factory):
+    rep = ImageReplicator(BLOB_CFG, session_factory, Clients())
+    base = {"source_cloud": "azure", "target_cloud": "gcp", "name": "web"}
+    with pytest.raises(ValueError, match="not in azure_source_accounts"):
+        rep.describe({**base, "source_id": "https://evil.blob.core.windows.net/vhds/a.vhd"})
+    with pytest.raises(ValueError, match=r"must not contain '\.\.'"):
+        rep.describe({**base, "source_id": "https://srcacct.blob.core.windows.net/vhds/x/../a.vhd"})
+    rep.describe({**base, "source_id": "https://srcacct.blob.core.windows.net/vhds/a.vhd"})
 
 
 def test_image_request_validation(session_factory):

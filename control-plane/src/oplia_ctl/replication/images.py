@@ -12,6 +12,11 @@ CronJob; one step per call, so a restart resumes where it stopped):
   also on failure.
 * Azure snapshot/disk -> GCP image : SAS -> strip the 512-byte footer (validated) -> tar.gz ->
   images.insert.
+* Azure *blob* VHD (an unmanaged page blob, ``https://<account>.blob.core.windows.net/<container>/<path>.vhd``)
+  -> AWS / GCP : fixed, dynamic or differencing VHDs are read with range requests and expanded to the
+  raw disk by vhd.VhdImage (a differencing disk's parent is looked up next to it in the same
+  container and must carry the UUID the child records). Only storage accounts listed in
+  ``azure_source_accounts`` are accepted. For AWS a fixed VHD footer is written after the raw disk.
 * GCP as a source is refused: Compute Engine has no API that returns image bytes (``gcloud
   compute images export`` runs a Cloud Build workflow on a temporary VM). Not implemented.
 
@@ -40,12 +45,14 @@ from oplia_ctl.replication.keys import validate_key_ref
 from oplia_ctl.replication.models import ImageJobRow
 from oplia_ctl.replication.streams import ChainReader, HashingReader, Readable, Zeros, write_disk_tar_gz
 from oplia_ctl.replication.tags import map_tags
-from oplia_ctl.replication.vhd import FOOTER_SIZE, build_footer, padded_size, parse_footer
+from oplia_ctl.replication.vhd import FOOTER_SIZE, VhdImage, build_footer, padded_size, parse_footer
 
 ACTION_IMAGE_REPLICATE = "dr.image_replicate"
 _AMI = re.compile(r"^ami-[0-9a-f]{8,17}$")
 _AZ_SRC = re.compile(r"^/subscriptions/([0-9a-f-]{36})/resourceGroups/([^/]+)/providers/Microsoft\.Compute/"
                      r"(snapshots|disks)/([^/]+)$", re.IGNORECASE)
+_AZ_BLOB = re.compile(r"^https://([a-z0-9]{3,24})\.blob\.core\.windows\.net/([a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?)/"
+                      r"([A-Za-z0-9._/-]{1,900}\.vhd)$")
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 
 
@@ -81,6 +88,7 @@ class ImageSettings(BaseModel):
     azure: AzureTarget | None = None
     gcp: GcpTarget | None = None
     tags: dict[str, str] = Field(default_factory=lambda: {"replicated-by": "oplia"})
+    azure_source_accounts: list[str] = Field(default_factory=list)   # storage accounts blob VHDs may come from
 
     def model_post_init(self, _: Any) -> None:
         if self.aws and self.aws.kms_key:
@@ -156,7 +164,13 @@ def validate_request(source_cloud: str, source_id: str, target_cloud: str, name:
     if source_cloud == "aws" and not _AMI.match(source_id):
         raise ValueError("AWS source must be an AMI id (ami-...)")
     if source_cloud == "azure" and not _AZ_SRC.match(source_id):
-        raise ValueError("Azure source must be a managed snapshot or disk resource id")
+        m = _AZ_BLOB.match(source_id)
+        if m is None:
+            raise ValueError("Azure source must be a managed snapshot or disk resource id, or a blob VHD URL")
+        if ".." in m.group(3).split("/"):
+            raise ValueError("blob path must not contain '..'")
+        if m.group(1) not in cfg.azure_source_accounts:
+            raise ValueError(f"storage account {m.group(1)!r} is not in azure_source_accounts")
     if source_cloud not in ("aws", "azure") or target_cloud not in ("aws", "azure", "gcp"):
         raise ValueError("unknown cloud")
     if not _NAME.match(name):
@@ -187,7 +201,8 @@ class ImageReplicator:
     def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.describe(payload)
         jid = str(uuid.uuid4())
-        first = "EXPORT" if payload["source_cloud"] == "aws" else "GRANT"
+        first = ("EXPORT" if payload["source_cloud"] == "aws"
+                 else "TRANSFER" if _AZ_BLOB.match(payload["source_id"]) else "GRANT")
         now = self._now()
         with self._sf() as s, s.begin():
             s.add(ImageJobRow(id=jid, source_cloud=payload["source_cloud"], source_id=payload["source_id"],
@@ -314,11 +329,42 @@ class ImageReplicator:
             s3 = self._c.s3(aws.region)
             obj = s3.get_object(Bucket=aws.staging_bucket, Key=st["export_key"])
             return int(obj["ContentLength"]), obj["Body"], lambda: b"", lambda: None
+        blob = _AZ_BLOB.match(job.source_id)
+        if blob is not None:
+            img = VhdImage(*self._blob_ranges(blob.group(1), blob.group(2), blob.group(3)))
+            st["source_disk_type"] = {2: "fixed", 3: "dynamic", 4: "differencing"}[img.disk_type]
+            return img.size, img.reader(), lambda: build_footer(img.size), lambda: None
         total, reader, close = self._c.http_get(st["sas"])
         if total < FOOTER_SIZE + 512:
             close()
             raise RuntimeError(f"source VHD too small ({total} bytes)")
         return total - FOOTER_SIZE, reader, lambda: reader.read(FOOTER_SIZE), close
+
+    def _blob_ranges(self, account: str, container: str, path: str) -> tuple[Any, Any]:
+        """RangeSource for the blob, and a parent resolver confined to the same container and folder."""
+        client = self._c.azure_container(f"https://{account}.blob.core.windows.net", container)
+        folder = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+
+        class BlobRange:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.size = int(client.get_blob_client(name).get_blob_properties().size)
+
+            def read_at(self, offset: int, length: int) -> bytes:
+                if length <= 0 or offset >= self.size:
+                    return b""
+                return bytes(client.download_blob(self.name, offset=offset,
+                                                  length=min(length, self.size - offset)).readall())
+
+        def parent(recorded: str) -> BlobRange:
+            # relative locator (".\\base.vhd") or absolute (Windows path): only the file name is used;
+            # VhdImage then checks the parent's UUID against the one the child recorded
+            base = recorded.replace("\\", "/").rsplit("/", 1)[-1]
+            if not base or base in (".", "..") or not base.lower().endswith(".vhd"):
+                raise ValueError(f"differencing parent {recorded!r} is not a .vhd file name")
+            return BlobRange(folder + base)
+
+        return BlobRange(path), parent
 
     def _step_transfer(self, job: ImageJobRow, st: dict[str, Any]) -> str:
         raw_size, src, footer_of, close = self._source_raw(job, st)
@@ -332,14 +378,14 @@ class ImageReplicator:
                 self._to_s3_vhd(job, st, raw, raw_size, footer_of)
             if raw.count != raw_size:
                 raise RuntimeError(f"read {raw.count} of {raw_size} raw bytes from the source")
-            if job.source_cloud == "azure" and job.target_cloud != "aws":
+            if job.source_cloud == "azure" and job.target_cloud != "aws" and not _AZ_BLOB.match(job.source_id):
                 parse_footer(footer_of())          # the source must be a valid fixed VHD
         finally:
             close()
         st.update(raw_size=raw_size, sha256=raw.hexdigest())
         self._verify_staged(job, st)
         st["verified"] = True
-        if job.source_cloud == "azure":
+        if job.source_cloud == "azure" and not _AZ_BLOB.match(job.source_id):
             st.pop("sas", None)
             return "REVOKE"
         return "CREATE"
