@@ -63,6 +63,15 @@ jobs:
           curl -sSfL "$base/checksums-linux.txt" | grep " bao_2.5.3_Linux_x86_64.tar.gz$" | sha256sum -c -
           mkdir -p bao-bin && tar xzf bao_2.5.3_Linux_x86_64.tar.gz -C bao-bin bao
           echo "$RUNNER_TEMP/bao-bin" >> "$GITHUB_PATH"
+      - name: CNCF Distribution registry 3.0.0 for the registry replication tests (checksum pinned)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          base=https://github.com/distribution/distribution/releases/download/v3.0.0
+          curl -sSfLO "$base/registry_3.0.0_linux_amd64.tar.gz"
+          echo "61c9a2c0d5981a78482025b6b69728521fbc78506d68b223d4a2eb825de5ca3d  registry_3.0.0_linux_amd64.tar.gz" | sha256sum -c -
+          mkdir -p registry-bin && tar xzf registry_3.0.0_linux_amd64.tar.gz -C registry-bin registry
+          echo "OPLIA_TEST_REGISTRY_BIN=$RUNNER_TEMP/registry-bin/registry" >> "$GITHUB_ENV"
       - name: Start test OpenBao server
         run: |
           set -euo pipefail

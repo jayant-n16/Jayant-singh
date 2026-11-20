@@ -157,7 +157,7 @@ def build(settings: Settings) -> FastAPI:
         executors[ACTION_OBJECT_DELETE] = object_replicator.deletion_executor()
     if image_replicator is not None:
         executors[ACTION_IMAGE_REPLICATE] = image_replicator
-    dr_jobs = build_job_machines(rep_cfg, make_session_factory(engine), audit=gate_audit(gate))
+    dr_jobs = build_job_machines(rep_cfg, make_session_factory(engine), audit=gate_audit(gate), secrets=secrets)
     for machine in dr_jobs.values():
         executors[machine.action] = machine
     integrations = build_integrations(

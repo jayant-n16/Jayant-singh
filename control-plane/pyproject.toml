@@ -42,6 +42,7 @@ dev = [
   "jsonschema==4.26.0",          # scripts/validate-crs.py (mesh CI) and its tests
   "types-PyYAML",
   "libvhdi-python==20260901",    # independent VHD reader (libyal) for the differencing-VHD tests
+  "bcrypt==4.3.0",               # htpasswd for the real-registry replication tests
 ]
 
 [project.scripts]

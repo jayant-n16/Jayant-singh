@@ -14,6 +14,7 @@ from oplia_ctl.replication.drills import DrillSettings, RestoreDrills
 from oplia_ctl.replication.images import ImageSettings
 from oplia_ctl.replication.jobs import JobMachine
 from oplia_ctl.replication.objects import ObjectPair
+from oplia_ctl.replication.registries import RegistryReplicator, RegistrySettings
 
 ACTION_PIPELINE = "dr.pipeline"
 
@@ -28,22 +29,25 @@ class ReplicationSettings(BaseSettings):
     max_objects_per_run: int = Field(default=5000, ge=1, le=100000)
     verify_readback: bool = True
     drills: DrillSettings | None = None                                 # JSON object
+    registries: RegistrySettings | None = None                          # JSON object
 
     def enabled(self) -> bool:
         return bool(self.object_pairs or self.images or self.kafka_connect_url or self.job_modules_configured())
 
     def job_modules_configured(self) -> bool:
-        return self.drills is not None
+        return self.drills is not None or self.registries is not None
 
 
 def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
-                       audit: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, JobMachine]:
+                       audit: Callable[[str, dict[str, Any]], None] | None = None,
+                       secrets: Any = None) -> dict[str, JobMachine]:
     """Every configured persisted-step DR module, keyed by ``kind``."""
-    out: dict[str, JobMachine] = {}
+    machines: list[JobMachine] = []
     if cfg.drills is not None:
-        m = RestoreDrills(cfg.drills, session_factory, audit=audit)
-        out[m.kind] = m
-    return out
+        machines.append(RestoreDrills(cfg.drills, session_factory, audit=audit))
+    if cfg.registries is not None:
+        machines.append(RegistryReplicator(cfg.registries, session_factory, secrets=secrets, audit=audit))
+    return {m.kind: m for m in machines}
 
 
 def gate_audit(gate: Any, actor: str = "dr-worker") -> Callable[[str, dict[str, Any]], None]:
@@ -111,7 +115,10 @@ def job_worker_main() -> None:  # pragma: no cover - process wiring, exercised i
     """CronJob: advance queued/running DR jobs of every configured module (drills, registries, ...)."""
     cfg = ReplicationSettings()
     gate, sf = _setup()
-    machines = build_job_machines(cfg, sf, audit=gate_audit(gate))
+    from oplia_ctl.config import get_settings
+    from oplia_ctl.secrets import build_secret_provider
+    machines = build_job_machines(cfg, sf, audit=gate_audit(gate),
+                                  secrets=build_secret_provider(get_settings().secret_provider))
     if not machines:
         raise SystemExit("no DR job module configured (OPLIA_REPLICATION_DRILLS, ...)")
     print(json.dumps({kind: m.run_pending() for kind, m in machines.items()}, indent=2))
