@@ -38,6 +38,8 @@ GET  /audit/verify                    approver: verify the audit hash chain
 GET  /inventory/instances             operator/approver: cached compute inventory (?cloud=&region=&state=)
 GET  /inventory/scans                 operator/approver: inventory scan history
 POST /inventory/instances/{id}/power  operator/approver: propose start/stop (compute.power, gated)
+GET  /databases                       operator/approver: configured databases with their last health check
+POST /databases/{name}/check          operator/approver: run a read-only health check now (audited)
 """
 
 
@@ -58,6 +60,7 @@ from oplia_ctl.aiops.matrix import Alert
 from oplia_ctl.aiops.models import PredictionStatus
 from oplia_ctl.auth import AuthError, OIDCVerifier, Principal, verify_webhook
 from oplia_ctl.cloud.power import parse_target as parse_power_target
+from oplia_ctl.databases.registry import DatabaseRegistry
 from oplia_ctl.dr.breaker import CircuitBreaker, list_incidents
 from oplia_ctl.finops.compliance import list_findings, list_scans
 from oplia_ctl.finops.optimizer import MaintenanceWindowClosedError, list_candidates
@@ -162,6 +165,7 @@ def create_app(
     dr_breaker: CircuitBreaker | None = None,
     db_ping: Callable[[], None] | None = None,
     inventory_sf: sessionmaker[Session] | None = None,
+    db_registry: DatabaseRegistry | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -465,6 +469,26 @@ def create_app(
     def inventory_scans(_: Annotated[Principal, Depends(reader)], limit: int = 20) -> list[dict[str, Any]]:
         return list_inventory_scans(_inventory(), limit)
 
+    # ------------------------------------------------------------ databases
+    def _dbs() -> DatabaseRegistry:
+        if db_registry is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no databases configured (OPLIA_DATABASES)")
+        return db_registry
+
+    @app.get("/databases")
+    def databases(_: Annotated[Principal, Depends(reader)]) -> list[dict[str, Any]]:
+        return _dbs().latest()
+
+    @app.post("/databases/{name}/check")
+    def database_check(name: str, p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        reg = _dbs()
+        if name not in reg.specs:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown database")
+        result = reg.check(name, triggered_by=p.subject)
+        gate.record_event(actor=p.subject, event="db_health_check",
+                          detail={"database": name, "ok": result["ok"], "latency_ms": result["latency_ms"]})
+        return result
+
     # ------------------------------------------------------------------ JIT
     def _jit() -> JitService:
         if jit is None:
@@ -588,7 +612,7 @@ def create_app(
                         "read": p.has_role(approver_role) or p.has_role(operator_role)},
                 "features": {"aiops": escalation is not None or aiops_engine is not None,
                              "finops": finops_sf is not None, "jit": jit is not None,
-                             "inventory": inventory_sf is not None,
+                             "inventory": inventory_sf is not None, "databases": db_registry is not None,
                              "dr": dr_breaker is not None}}
 
     @app.get("/kill-switch")

@@ -40,6 +40,17 @@ console **Infrastructure** screen. Start/stop is a gated proposal (`compute.powe
 Start/StopInstances, Azure start/deallocate, GCP instances.start/stop, IBM VPC instance actions.
 Tested with moto (AWS) and fakes/respx (Azure, GCP, IBM); not run against real accounts.
 
+## Database registry and health
+
+Databases are declared in `OPLIA_DATABASES` (JSON list, example `examples/databases/databases.example.json`):
+name, engine (`postgres`, `mysql`, `mongodb`, `cockroachdb`), cloud, role (`primary`/`dr`/`replica`),
+`dr_of` (the source of a DR copy) and `dsn_secret` - the *name* of the secret holding the connection
+string (Vault `secret/data/coc/<name>`); it never appears in API responses, and connection errors are
+scrubbed of the DSN and password. `oplia-db-health` (CronJob, every 5 min) and `POST /databases/{name}/check`
+(operator/approver, audited) run read-only checks: version, role (primary/standby/replica/secondary),
+read-only flag and replication state/lag per engine. Console: **Databases**. Tested against real
+PostgreSQL 16 and MySQL 8 servers in CI; MongoDB and CockroachDB with fakes of their status commands.
+
 ## Try it locally with a login (development only)
 
 `oplia-dev-idp` is a local OIDC login (authorization code + PKCE) so the API - and the admin

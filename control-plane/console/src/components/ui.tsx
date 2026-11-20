@@ -8,6 +8,7 @@ const TONE: Record<string, string> = {
   EXECUTED: "ok", ESCALATED: "ok", CLOSED: "ok", RESOLVED: "ok", REVOKED: "muted",
   REJECTED: "muted", EXPIRED: "muted", CANCELLED: "muted", NONE: "muted",
   FAILED: "danger", GRANT_FAILED: "danger",
+  CONNECTED: "ok", UNREACHABLE: "danger", CONSISTENT: "ok", DRIFT: "danger",
   RUNNING: "ok", STOPPED: "muted", TERMINATED: "muted", STOPPING: "warn", STARTING: "warn",
 };
 

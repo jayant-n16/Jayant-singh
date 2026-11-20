@@ -2,7 +2,7 @@ export interface Me {
   subject: string;
   roles: string[];
   can: { approve: boolean; operate: boolean; read: boolean };
-  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean };
 }
 
 export type ProposalStatus =
@@ -186,4 +186,24 @@ export interface InventoryScan {
   new_instances: number;
   gone_instances: number;
   source_errors: { source: string; error: string }[];
+}
+
+export interface DbCheck {
+  checked_at: string;
+  ok: boolean;
+  latency_ms: number | null;
+  detail: { version?: string; role?: string; read_only?: boolean; replication?: Record<string, unknown> };
+  error: string | null;
+  triggered_by: string;
+}
+
+export interface DatabaseEntry {
+  name: string;
+  engine: "postgres" | "mysql" | "mongodb" | "cockroachdb";
+  cloud: string;
+  role: "primary" | "dr" | "replica";
+  database: string | null;
+  dr_of: string | null;
+  description: string;
+  last_check: DbCheck | null;
 }

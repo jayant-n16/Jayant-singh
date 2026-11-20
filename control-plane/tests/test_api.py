@@ -154,7 +154,8 @@ def test_me_reports_roles_and_capabilities(api):
     me = api.get("/me", headers=bearer("carol", "oplia-approver", "oplia-operator")).json()
     assert me["subject"] == "carol" and me["roles"] == ["oplia-approver", "oplia-operator"]
     assert me["can"] == {"approve": True, "operate": True, "read": True}
-    assert me["features"] == {"aiops": False, "finops": False, "jit": False, "dr": False, "inventory": False}
+    assert me["features"] == {"aiops": False, "finops": False, "jit": False, "dr": False,
+                              "inventory": False, "databases": False}
     nobody = api.get("/me", headers=bearer("dave")).json()  # signed in, no role: allowed, can nothing
     assert nobody["can"] == {"approve": False, "operate": False, "read": False}
     assert api.get("/me").status_code == 401

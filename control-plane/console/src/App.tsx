@@ -8,6 +8,7 @@ import { ErrorNote, Loading } from "./components/ui";
 import type { ConsoleConfig } from "./config";
 import Aiops from "./pages/Aiops";
 import Audit from "./pages/Audit";
+import Databases from "./pages/Databases";
 import Dr from "./pages/Dr";
 import FinOps from "./pages/FinOps";
 import Infrastructure from "./pages/Infrastructure";
@@ -88,6 +89,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
             <NavLink to="/" end>Overview</NavLink>
             <NavLink to="/proposals">Proposals</NavLink>
             {m.features.inventory ? <NavLink to="/infrastructure">Infrastructure</NavLink> : null}
+            {m.features.databases ? <NavLink to="/databases">Databases</NavLink> : null}
             {m.can.approve ? <NavLink to="/audit">Audit log</NavLink> : null}
             {m.features.dr ? <NavLink to="/dr">DR breakers</NavLink> : null}
             {m.features.finops ? <NavLink to="/finops">FinOps</NavLink> : null}
@@ -101,6 +103,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
               <Route path="/proposals/:id" element={<ProposalDetail />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/infrastructure" element={<Feature on={m.features.inventory === true} name="Infrastructure"><Infrastructure /></Feature>} />
+              <Route path="/databases" element={<Feature on={m.features.databases === true} name="Databases"><Databases /></Feature>} />
               <Route path="/dr" element={<Feature on={m.features.dr} name="DR circuit breaker"><Dr /></Feature>} />
               <Route path="/finops" element={<Feature on={m.features.finops} name="FinOps"><FinOps /></Feature>} />
               <Route path="/jit" element={<Feature on={m.features.jit} name="JIT access"><Jit /></Feature>} />

@@ -8,6 +8,7 @@ from datetime import timedelta
 from fastapi import FastAPI
 
 import oplia_ctl.aiops.models
+import oplia_ctl.databases.models
 import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models
@@ -33,6 +34,8 @@ from oplia_ctl.cloud.azure_isolation import AzureNicIsolationExecutor
 from oplia_ctl.cloud.k8s_isolation import K8sNamespaceIsolationExecutor
 from oplia_ctl.cloud.power import ComputePowerExecutor
 from oplia_ctl.config import Settings, get_settings
+from oplia_ctl.databases.config import DatabaseSettings
+from oplia_ctl.databases.registry import DatabaseRegistry
 from oplia_ctl.db import Base, make_engine, make_session_factory
 from oplia_ctl.dr.config import DRSettings, build_breaker
 from oplia_ctl.drivers.cicd import build_cicd_driver
@@ -91,6 +94,7 @@ def build(settings: Settings) -> FastAPI:
         jit = JitService(gate=gate, session_factory=make_session_factory(engine), providers=providers,
                          catalog=load_catalog(identity_cfg.catalog_path, providers))
     finops_cfg = FinOpsSettings()
+    db_cfg = DatabaseSettings()
     executors.update(build_executors(finops_cfg, WindowGuard(finops_cfg.maintenance_windows)))
     aiops_cfg = AIOpsSettings()
     aiops_engine: AIOpsEngine | None = None
@@ -143,6 +147,8 @@ def build(settings: Settings) -> FastAPI:
         jit=jit,
         dr_breaker=dr_breaker,
         db_ping=sqlalchemy_ping(engine),
+        db_registry=(DatabaseRegistry(db_cfg.databases, secrets, make_session_factory(engine))
+                     if db_cfg.databases else None),
         inventory_sf=make_session_factory(engine) if (
             finops_cfg.aws_regions or finops_cfg.azure_subscriptions or finops_cfg.gcp_scopes
             or finops_cfg.ibm_account_id) else None,
