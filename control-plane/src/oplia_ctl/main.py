@@ -13,7 +13,8 @@ import oplia_ctl.databases.models
 import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models
-import oplia_ctl.inventory.models  # noqa: F401  (registers the tables)
+import oplia_ctl.inventory.models
+import oplia_ctl.network.models  # noqa: F401
 from oplia_ctl.aiops.config import AIOpsSettings, build_notifier, build_scheduler
 from oplia_ctl.aiops.engine import AIOpsEngine
 from oplia_ctl.aiops.escalation import EscalationScheduler
@@ -50,6 +51,7 @@ from oplia_ctl.identity.jit import JitService, load_catalog
 from oplia_ctl.identity.sweep import ACTION_DISABLE_INACTIVE, DisableInactiveExecutor
 from oplia_ctl.integrations import build_integrations
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
+from oplia_ctl.network.service import NetworkService, NetworkSettings, TrafficDialExecutor
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
 from oplia_ctl.safety import Executor, SafetyGate
 from oplia_ctl.secrets import build_secret_provider
@@ -130,6 +132,11 @@ def build(settings: Settings) -> FastAPI:
                         token_secret=soar_cfg.siem_token_secret, secrets=secrets, client=client,
                         dead_letter_path=soar_cfg.dead_letter_path)
         soar_exporter = SOARExporter(gate=gate, sink=sink, threshold=soar_cfg.threshold)
+    net_cfg = NetworkSettings()
+    network = (NetworkService(net_cfg, make_session_factory(engine), secrets=secrets, client=client)
+               if net_cfg.enabled() else None)
+    if network is not None and net_cfg.endpoint_groups:
+        executors["network.traffic_dial"] = TrafficDialExecutor(network)
     integrations = build_integrations(
         settings=settings, secrets=secrets, client=client, finops_cfg=finops_cfg, providers=providers,
         identity_cfg=identity_cfg, aiops_cfg=aiops_cfg, soar_cfg=soar_cfg, siem_sink=sink,
@@ -173,6 +180,7 @@ def build(settings: Settings) -> FastAPI:
         db_registry=db_registry,
         consistency=consistency,
         integrations=integrations,
+        network=network,
         inventory_sf=make_session_factory(engine) if (
             finops_cfg.aws_regions or finops_cfg.azure_subscriptions or finops_cfg.gcp_scopes
             or finops_cfg.ibm_account_id) else None,

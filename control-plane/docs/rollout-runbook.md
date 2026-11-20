@@ -262,31 +262,55 @@ offsets are only committed after the DR topic acknowledged, so no change is lost
 
 ---
 
-## Phase 4 – Anycast / global load balancer cutover
+## Phase 4 – Global entry (AWS Global Accelerator) and private interconnect cutover
 
-OPLIA does not configure the global load balancer; this phase is executed with the provider's own
-tools. Keep the existing cloud-native DNS records unchanged as the fallback path.
+Global entry is AWS Global Accelerator (`terraform/modules/aws-global-accelerator`); private
+cross-cloud paths are Equinix Fabric and/or Megaport to AWS Direct Connect, Azure ExpressRoute, GCP
+Partner Interconnect and IBM Direct Link (`terraform/examples/network` shows the order). Keep the
+existing cloud-native DNS records unchanged as the fallback path. **Nothing in this phase has been
+applied to a real account by the authors; Terraform is validated in CI only.**
 
-1. Put the global load balancer (Cloudflare Load Balancing / Magic Transit or AWS Global Accelerator)
-   in front of the existing public endpoints with health checks on each cloud's `/healthz`.
-2. Shift traffic in steps: **10 % → 25 % → 50 % → 100 %** through the global entry point; within it,
-   cloud weights move from the current primary (e.g. 90/10) towards 25/25/25/25. Example for AWS
-   Global Accelerator:
+1. **Interconnects first** (two-step order, see `terraform/examples/network/main.tf`): apply the
+   Azure circuit and GCP attachments (they mint the keys), then the Equinix / Megaport connections,
+   then accept on the cloud sides (AWS hosted connection accept + private VIF, IBM
+   `create_gateway_approve`, Azure private peering, GCP `activate = true`). Check in OPLIA →
+   **Network**: every Direct Connect connection `available` and BGP `up` on both legs.
+2. **Mesh**: install Consul *or* Linkerd per cluster (`deploy/mesh/README.md`) and peer/link the
+   clusters over the interconnect. Network screen: Consul peerings `ACTIVE` / Linkerd links with no
+   "not ready" services.
+3. **Accelerator**: apply the module with the current primary at dial 100 and the others at 0, point
+   the global hostname at `dns_name`, and set `OPLIA_NETWORK_ENDPOINT_GROUPS` to the module output
+   `endpoint_group_arns` (JSON), so OPLIA owns every later dial change (the module ignores
+   `traffic_dial_percentage` after creation).
+4. **Shift traffic in steps through OPLIA** — never with the AWS CLI during the rollout, so every step
+   is approved and audited:
    ```bash
-   aws globalaccelerator update-endpoint-group --endpoint-group-arn "$EG_ARN" --traffic-dial-percentage 10
+   auth -X POST "$OPLIA/network/endpoint-groups/azure/traffic-dial" -H 'Content-Type: application/json' \
+     -d '{"percentage": 10, "reason": "Phase 4 step 1"}'          # creates a PENDING proposal
+   auth -X POST "$OPLIA/proposals/$ID/approve" -d '{"note":"monitors green"}' -H 'Content-Type: application/json'  # second person
+   auth -X POST "$OPLIA/proposals/$ID/execute"                    # operator; UpdateEndpointGroup + read-back
    ```
-3. Hold each step at least 30 min (the 100 % step 24 h). Before every increment:
+   Steps per group **0 → 10 → 25 → 50 → 75 → 100** until the target split is reached. OPLIA refuses
+   (HTTP 409) an increase larger than `OPLIA_NETWORK_MAX_INCREASE` (default 25 points), an increase
+   less than `OPLIA_NETWORK_MIN_HOLD_MINUTES` (default 30) after the previous executed change of that
+   group, and any increase while an endpoint of the group is not `HEALTHY`. At execution it re-reads
+   the live dial and refuses if it is no longer the value the approval was based on.
+5. Hold each step at least 30 min (the last step 24 h). Before every increment:
    ```bash
    for c in aws azure gcp ibm; do curl -sS -o /dev/null -w "$c %{http_code} %{time_total}\n" "https://$c.app.example.com/healthz"; done
+   auth "$OPLIA/network/status" | jq '.global_accelerator.items[] | {key, traffic_dial, all_healthy}'
    ```
    and all of these green: the PromQL stop conditions above, the Datadog monitors on
    `trace.*.errors` / `trace.*.hits` for `env:production` and p99 per service, and no open Dynatrace
    problem for the affected services.
 
-**Gate 4**: 100 % through the global entry point for 24 h with all monitors green.
+**Gate 4**: target split reached through the global entry point for 24 h with all monitors green;
+both legs of every interconnect up.
 
-**Rollback 4**: set the dial/weights back to the previous step (seconds); in an emergency send clients
-back to the unchanged DNS records.
+**Rollback 4**: propose the previous dial value (decreases are never blocked by step size, hold time
+or health) and execute it; in an emergency with OPLIA unavailable, break glass with
+`aws globalaccelerator update-endpoint-group --region us-west-2 --endpoint-group-arn "$EG_ARN" --traffic-dial-percentage 0`
+and record it, or send clients back to the unchanged DNS records.
 
 ---
 

@@ -2,7 +2,7 @@ export interface Me {
   subject: string;
   roles: string[];
   can: { approve: boolean; operate: boolean; read: boolean };
-  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean; integrations?: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean; integrations?: boolean; network?: boolean };
 }
 
 export type ProposalStatus =
@@ -246,4 +246,25 @@ export interface IntegrationStatus {
   can_test_notification: boolean;
   checked_at: string;
   latency_ms: number;
+}
+
+export interface NetSection<T> { configured: boolean; ok: boolean; items: T[]; error: string | null; latency_ms: number }
+export interface EndpointGroup {
+  key: string; arn: string; region?: string; traffic_dial?: number; health_check?: string; error?: string;
+  all_healthy: boolean;
+  endpoints: { endpoint_id: string; weight: number | null; health: string; health_reason: string }[];
+}
+export interface DxConnection {
+  region: string; id: string; name: string; state: string; partner: string; bandwidth: string; location: string;
+  virtual_interfaces: { id: string; name: string; type: string; state: string; vlan: number; bgp: string[] }[];
+}
+export interface ConsulPeering { name: string; state: string; peer_server_name: string; imported_services: number; exported_services: number; last_heartbeat: string | null }
+export interface LinkerdLink { name: string; namespace: string; target_cluster: string; gateway: string; mirrored_services: number; not_ready: string[] }
+export interface NetworkStatus {
+  global_accelerator: NetSection<EndpointGroup>;
+  direct_connect: NetSection<DxConnection>;
+  consul: NetSection<ConsulPeering>;
+  linkerd: NetSection<LinkerdLink>;
+  dial_history: { group: string; from: number; to: number; executed_at: string; request_id: string | null }[];
+  policy: { max_increase: number; min_hold_minutes: number };
 }

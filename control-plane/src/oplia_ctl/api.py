@@ -44,11 +44,14 @@ GET  /databases/consistency           operator/approver: DR consistency runs (?p
 POST /databases/{name}/consistency    operator/approver: compare a DR copy with its source now (audited)
 GET  /integrations                    operator/approver: status of clouds, CI/CD, IdPs, alerting, Vault (no secrets)
 POST /integrations/{name}/test        approver: send a test notification (Slack, PagerDuty, SIEM; audited)
+GET  /network/status                  operator/approver: Global Accelerator, Direct Connect, Consul, Linkerd
+POST /network/endpoint-groups/{key}/traffic-dial   operator/approver: propose a traffic-dial change (gated)
 """
 
 
 import hmac
 import json
+import uuid
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
@@ -73,6 +76,7 @@ from oplia_ctl.identity.jit import JitConflictError, JitRequestError, JitService
 from oplia_ctl.integrations import IntegrationRegistry
 from oplia_ctl.inventory.scanner import list_instances as list_inventory_instances
 from oplia_ctl.inventory.scanner import list_scans as list_inventory_scans
+from oplia_ctl.network.service import NetworkService
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
 from oplia_ctl.safety import (
     Executor,
@@ -118,6 +122,13 @@ class DecisionBody(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 ACTION_COMPUTE_POWER = "compute.power"
+ACTION_TRAFFIC_DIAL = "network.traffic_dial"
+
+
+class TrafficDialBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    percentage: float = Field(ge=0, le=100)
+    reason: str = Field(min_length=5, max_length=2000)
 
 
 class PowerBody(BaseModel):
@@ -174,6 +185,7 @@ def create_app(
     db_registry: DatabaseRegistry | None = None,
     consistency: ConsistencyChecker | None = None,
     integrations: IntegrationRegistry | None = None,
+    network: NetworkService | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -540,6 +552,39 @@ def create_app(
                           detail={"integration": name, "ok": ok, "error": error})
         return {"integration": name, "ok": ok, "detail": detail, "error": error}
 
+    # -------------------------------------------------------------- network
+    def _network() -> NetworkService:
+        if network is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "network layer not configured (OPLIA_NETWORK_*)")
+        return network
+
+    @app.get("/network/status")
+    def network_status(_: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        return _network().status()
+
+    @app.post("/network/endpoint-groups/{key}/traffic-dial", status_code=status.HTTP_201_CREATED)
+    def network_traffic_dial(key: str, body: TrafficDialBody,
+                             p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        net = _network()
+        if key not in net.cfg.endpoint_groups:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown endpoint group")
+        try:
+            live = net.endpoint_group(key)
+        except Exception as exc:  # cannot propose a step without knowing the current dial
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                                f"could not read endpoint group: {type(exc).__name__}: {str(exc)[:300]}") from None
+        try:
+            net.check_step(key, live["traffic_dial"], body.percentage, live["all_healthy"])
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+        proposal = gate.propose(
+            action_type=ACTION_TRAFFIC_DIAL, target=live["arn"],
+            payload={"group": key, "arn": live["arn"], "from": live["traffic_dial"], "to": body.percentage,
+                     "request_id": str(uuid.uuid4())},
+            reason=f"traffic dial {key} {live['traffic_dial']:g} % -> {body.percentage:g} %: {body.reason}"[:2000],
+            requested_by=p.subject)
+        return _proposal_json(proposal)
+
     # ------------------------------------------------------------------ JIT
     def _jit() -> JitService:
         if jit is None:
@@ -665,6 +710,7 @@ def create_app(
                              "finops": finops_sf is not None, "jit": jit is not None,
                              "inventory": inventory_sf is not None, "databases": db_registry is not None,
                              "consistency": consistency is not None, "integrations": integrations is not None,
+                             "network": network is not None,
                              "dr": dr_breaker is not None}}
 
     @app.get("/kill-switch")

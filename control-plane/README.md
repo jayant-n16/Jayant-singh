@@ -337,6 +337,30 @@ PagerDuty (an info-severity event that is resolved immediately with the same ded
 sink, and is recorded in the audit log as `integration_test_notification`. The console screen is
 "Integrations". Validated with respx/fakes only; not run against real Slack, PagerDuty or cloud accounts.
 
+## Network layer
+
+* **Global entry** – `terraform/modules/aws-global-accelerator` (flow logs on, health checks on
+  `/healthz`, one endpoint group per cloud). Terraform sets the initial traffic dial only.
+* **Traffic dial** – `POST /network/endpoint-groups/{key}/traffic-dial` creates a
+  `network.traffic_dial` proposal; after approval an operator executes it (UpdateEndpointGroup in
+  us-west-2, then read back). Step limit, hold time and health are checked at proposal and again at
+  execution; decreases are always allowed. History in `network_dial_changes` (migration 0008).
+* **Interconnects** – `equinix-fabric-cloud-connections` and `megaport-cloud-vxcs` (redundant legs)
+  to AWS Direct Connect, Azure ExpressRoute, GCP Partner Interconnect and IBM Direct Link, with the
+  accepting sides `aws-dx-hosted-accept`, `azure-expressroute-circuit`, `gcp-partner-interconnect`,
+  `ibm-direct-link-approve`; wiring in `terraform/examples/network`. Providers pinned: aws 6.72.0,
+  azurerm 5.13.0, google 8.10.0, ibm 2.9.0, equinix 5.3.0, megaport 1.26.3.
+* **Meshes** – Consul 2.1.0 and Linkerd edge 2026.10.2 (`deploy/mesh/`).
+* **Status** – `GET /network/status` and the console "Network" screen: endpoint groups and health,
+  Direct Connect connections/VIFs/BGP (`OPLIA_NETWORK_DX_REGIONS`), Consul peerings
+  (`OPLIA_NETWORK_CONSUL_ADDR`, token by secret name), Linkerd `Link` resources
+  (`OPLIA_NETWORK_LINKERD_LINKS=true`, needs list on `links.multicluster.linkerd.io`).
+
+Validated: `terraform validate` of every module and the example root, checkov, Helm rendering +
+kubeconform (CI); the API and executor with botocore Stubber (requests checked against the AWS API
+model), respx and fakes. **Not validated: anything against a real AWS, Azure, GCP, IBM, Equinix or
+Megaport account, or a real cluster.**
+
 ## API
 
 | Method | Path | Auth |
