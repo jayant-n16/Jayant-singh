@@ -54,7 +54,7 @@ from oplia_ctl.integrations import build_integrations
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
 from oplia_ctl.network.service import NetworkService, NetworkSettings, TrafficDialExecutor
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
-from oplia_ctl.replication.config import ACTION_PIPELINE, ReplicationSettings
+from oplia_ctl.replication.config import ACTION_PIPELINE, ReplicationSettings, build_job_machines, gate_audit
 from oplia_ctl.replication.images import ACTION_IMAGE_REPLICATE, ImageReplicator
 from oplia_ctl.replication.objects import ACTION_OBJECT_DELETE, ACTION_OBJECT_SYNC, ObjectReplicator
 from oplia_ctl.replication.pipelines import KafkaConnect, PipelineExecutor
@@ -157,6 +157,9 @@ def build(settings: Settings) -> FastAPI:
         executors[ACTION_OBJECT_DELETE] = object_replicator.deletion_executor()
     if image_replicator is not None:
         executors[ACTION_IMAGE_REPLICATE] = image_replicator
+    dr_jobs = build_job_machines(rep_cfg, make_session_factory(engine), audit=gate_audit(gate))
+    for machine in dr_jobs.values():
+        executors[machine.action] = machine
     integrations = build_integrations(
         settings=settings, secrets=secrets, client=client, finops_cfg=finops_cfg, providers=providers,
         identity_cfg=identity_cfg, aiops_cfg=aiops_cfg, soar_cfg=soar_cfg, siem_sink=sink,
@@ -204,6 +207,7 @@ def build(settings: Settings) -> FastAPI:
         kafka_connect=kafka_connect,
         object_replicator=object_replicator,
         image_replicator=image_replicator,
+        dr_jobs=dr_jobs,
         inventory_sf=make_session_factory(engine) if (
             finops_cfg.aws_regions or finops_cfg.azure_subscriptions or finops_cfg.gcp_scopes
             or finops_cfg.ibm_account_id) else None,

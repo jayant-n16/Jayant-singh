@@ -59,6 +59,7 @@ oplia-db-health = "oplia_ctl.databases.config:health_main"
 oplia-db-consistency = "oplia_ctl.databases.config:consistency_main"
 oplia-dr-object-plan = "oplia_ctl.replication.config:object_plan_main"
 oplia-dr-image-worker = "oplia_ctl.replication.config:image_worker_main"
+oplia-dr-job-worker = "oplia_ctl.replication.config:job_worker_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

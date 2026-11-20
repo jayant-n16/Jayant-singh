@@ -53,6 +53,9 @@ POST /dr/replication/objects/{pair}/deletions      propose removing target copie
                                                    (only pairs with replicate_deletions: true; gated)
 POST /dr/replication/images                        propose a VM image replication (gated, worker runs it)
 POST /dr/replication/tags/preview                  how tags map to aws/azure/gcp (no side effects)
+GET  /dr/jobs                                       operator/approver: DR job modules (drills, ...) and their jobs
+GET  /dr/jobs/{kind}/{id}                           operator/approver: one DR job with its persisted state
+POST /dr/jobs/{kind}                               propose a DR job (gated; oplia-dr-job-worker runs it)
 """
 
 
@@ -87,6 +90,7 @@ from oplia_ctl.network.service import NetworkService
 from oplia_ctl.remediation.drift import BlueprintNotAllowedError, DriftEvent, propose_drift_remediation
 from oplia_ctl.replication.config import ACTION_PIPELINE
 from oplia_ctl.replication.images import ACTION_IMAGE_REPLICATE, ImageReplicator, validate_request
+from oplia_ctl.replication.jobs import JobMachine
 from oplia_ctl.replication.objects import ACTION_OBJECT_DELETE, ACTION_OBJECT_SYNC, ObjectReplicator
 from oplia_ctl.replication.pipelines import ACTIONS as PIPELINE_ACTIONS
 from oplia_ctl.replication.pipelines import KafkaConnect
@@ -149,6 +153,12 @@ class ImageReplicateBody(BaseModel):
 
 class ReasonBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=5, max_length=2000)
+
+
+class DrJobBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    params: dict[str, Any] = Field(default_factory=dict)
     reason: str = Field(min_length=5, max_length=2000)
 
 
@@ -222,6 +232,7 @@ def create_app(
     kafka_connect: KafkaConnect | None = None,
     object_replicator: ObjectReplicator | None = None,
     image_replicator: ImageReplicator | None = None,
+    dr_jobs: dict[str, JobMachine] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="OPLIA Control Plane", version="0.1.0", docs_url=None, redoc_url=None)
 
@@ -728,6 +739,44 @@ def create_app(
     def replication_tag_preview(body: TagPreviewBody, _: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
         return map_tags(body.tags, body.target).__dict__
 
+    # ---------------------------------------------------------- generic DR jobs
+    jobs_by_kind: dict[str, JobMachine] = dict(dr_jobs or {})
+
+    @app.get("/dr/jobs")
+    def dr_jobs_status(_: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        if not jobs_by_kind:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "no DR job module configured")
+        return {"modules": [{"kind": k, "title": m.title, "action": m.action, "fields": m.fields(),
+                             "summary": m.summary(), "jobs": m.jobs()} for k, m in jobs_by_kind.items()]}
+
+    @app.get("/dr/jobs/{kind}/{job_id}")
+    def dr_job_get(kind: str, job_id: str, _: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        m = jobs_by_kind.get(kind)
+        if m is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown DR job module")
+        try:
+            job = m.get(job_id)
+        except KeyError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found") from None
+        if job["kind"] != kind:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+        return job
+
+    @app.post("/dr/jobs/{kind}", status_code=status.HTTP_201_CREATED)
+    def dr_job_propose(kind: str, body: DrJobBody, p: Annotated[Principal, Depends(reader)]) -> dict[str, Any]:
+        m = jobs_by_kind.get(kind)
+        if m is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown DR job module")
+        try:
+            clean = m.parse(body.params)
+            text = m.describe(clean)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)[:1000]) from None
+        proposal = gate.propose(action_type=m.action, target=m.target_of(clean)[:512],
+                                payload={**clean, "requested_by": p.subject},
+                                reason=f"{m.title}: {text}: {body.reason}"[:2000], requested_by=p.subject)
+        return _proposal_json(proposal)
+
     # ------------------------------------------------------------------ JIT
     def _jit() -> JitService:
         if jit is None:
@@ -854,6 +903,7 @@ def create_app(
                              "inventory": inventory_sf is not None, "databases": db_registry is not None,
                              "consistency": consistency is not None, "integrations": integrations is not None,
                              "network": network is not None, "replication": replication_on,
+                             "dr_jobs": bool(jobs_by_kind),
                              "dr": dr_breaker is not None}}
 
     @app.get("/kill-switch")

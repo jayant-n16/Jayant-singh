@@ -2,7 +2,7 @@ export interface Me {
   subject: string;
   roles: string[];
   can: { approve: boolean; operate: boolean; read: boolean };
-  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean; integrations?: boolean; network?: boolean; replication?: boolean };
+  features: { aiops: boolean; finops: boolean; jit: boolean; dr: boolean; inventory?: boolean; databases?: boolean; consistency?: boolean; integrations?: boolean; network?: boolean; replication?: boolean; dr_jobs?: boolean };
 }
 
 export type ProposalStatus =
@@ -283,3 +283,7 @@ export interface ReplicationStatus {
   image_targets: { aws: boolean; azure: boolean; gcp: boolean };
 }
 export interface TagMap { tags: Record<string, string>; changes: string[]; dropped: string[] }
+
+export interface DrJob { id: string; kind: string; target: string; status: string; step: string; payload: Record<string, unknown>; state: Record<string, unknown>; error: string | null; requested_by: string; created_at: string; updated_at: string }
+export interface DrJobModule { kind: string; title: string; action: string; fields: import("./components/ui").Field[]; summary: Record<string, unknown>; jobs: DrJob[] }
+export interface DrJobsStatus { modules: DrJobModule[] }

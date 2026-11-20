@@ -50,3 +50,21 @@ class ImageJobRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     requested_by: Mapped[str] = mapped_column(String(256))
+
+
+class DrJobRow(Base):
+    """Generic persisted DR job (restore drills, registry copies, backups, ...): one step per worker call."""
+
+    __tablename__ = "dr_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    target: Mapped[str] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(16), index=True)   # QUEUED/RUNNING/SUCCEEDED/FAILED
+    step: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    state_json: Mapped[str] = mapped_column(Text, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    requested_by: Mapped[str] = mapped_column(String(256))

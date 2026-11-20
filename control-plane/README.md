@@ -380,6 +380,18 @@ operator). Key material never moves: data is re-encrypted on arrival with the *t
 | Object storage | S3 ↔ Blob ↔ GCS, incremental via a manifest (etag + size), source re-checked at copy time, SHA-256 while streaming plus read-back of the target, target-side key (SSE-KMS / Key Vault-backed encryption scope / Cloud KMS), mapped tags. Deletions are reported and never copied automatically; a pair can opt in with `replicate_deletions: true` (default false), then `POST /dr/replication/objects/{pair}/deletions` proposes a `dr.object_delete` (four-eyes, kill switch) that re-checks each key is still gone at the source, refuses batches above `max_delete_fraction` (default 10%) of the replicated objects, and removes the manifest rows. CronJob `oplia-dr-object-plan` creates proposals. | moto S3 (SSE-KMS and tags checked on the written object), fakes for Blob/GCS plus checks of the exact SDK arguments |
 | Keys and tags | Key references validated per cloud and purpose (`keys.py`); tags mapped with AWS / Azure limits and GCP label rules (lowercase, `[a-z0-9_-]`, ≤ 63, start with a letter, ≤ 64 labels); every rename, truncation, collision and drop reported; preview endpoint in the console. | unit tests |
 
+### DR jobs and restore drills
+
+Console screen **DR jobs & drills**; API `GET /dr/jobs`, `GET /dr/jobs/{kind}/{id}`,
+`POST /dr/jobs/{kind}` (body `{"params": {...}, "reason": "..."}`); table `dr_jobs` (migration 0010);
+CronJob `oplia-dr-job-worker` advances every queued job one persisted step at a time (a restart
+resumes at the saved step). Each module describes its own form fields, so new DR job types appear in
+the console without console changes.
+
+| Module | What it does | How it is verified here |
+|---|---|---|
+| Restore drill (`dr.restore_drill`, `OPLIA_REPLICATION_DRILLS`) | Boots a replicated image in a configured sandbox subnet with **no public IP** (AWS `RunInstances` with IMDSv2 required and an idempotency token; Azure NIC + VM from a managed image or gallery version, SSH key only, OS disk and NIC `delete_option=Delete`; GCP `instances.insert` without an access config, boot disk auto-deleted). Waits for running (AWS: both status checks `ok`), then runs `tcp:PORT` / `http:PORT/PATH=STATUS` checks from the control plane against the private IP, retried until `check_window_seconds`. **Always tears the instance down**, also after a boot timeout or failed checks, and waits until it is gone. Ends with a `dr_restore_drill` audit event: verdict, boot time, per-check result, teardown. The control plane needs network reach to the sandbox subnet. | botocore Stubber (EC2 requests checked against the API model), fakes receiving the real Azure / GCP SDK model objects, the probe tested against real local TCP/HTTP servers; worker restart and timeout paths tested |
+
 **Not supported, by design or not built:** GCP as an image *source* (Compute Engine has no API that
 returns image bytes; `gcloud compute images export` uses a Cloud Build workflow).
 
@@ -387,8 +399,7 @@ returns image bytes; `gcloud compute images export` uses a Cloud Build workflow)
 Registry); Kubernetes workload/volume backup and restore (e.g. Velero); Vault replication (Vault
 Enterprise performance/DR replication or OpenBao equivalents); DNS failover records outside Global
 Accelerator; translation of firewall rules / security groups / IAM between clouds; file-share
-replication (EFS / Azure Files / Filestore); message queue replication other than Kafka; automated
-restore drills that boot the replicated images and check them.
+replication (EFS / Azure Files / Filestore); message queue replication other than Kafka.
 
 **Not validated:** nothing in this section was run against a real AWS, Azure or GCP account or a
 real Kafka Connect cluster.
