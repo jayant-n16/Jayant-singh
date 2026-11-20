@@ -130,6 +130,28 @@ def test_executor_failure_is_recorded(gate):
     assert done.result == {"error_type": "RuntimeError", "error": "boom"}
 
 
+def test_dry_run_description_failure_is_recorded_not_stuck(session_factory, clock):
+    # Regression: a failing describe() (e.g. CI/CD target not configured) left the proposal in
+    # EXECUTING forever and the API answered HTTP 500.
+    class BrokenDescribe(RecordingExecutor):
+        def describe(self, payload: dict) -> str:
+            raise ValueError("OPLIA_CICD__GITHUB_REPOSITORY is not set")
+
+    gate = SafetyGate(session_factory, dry_run=True, clock=clock)
+    p = _propose(gate)
+    gate.approve(p.id, "bob")
+    ex = BrokenDescribe()
+    done = gate.execute(p.id, ex, "ops")
+    assert done.status is ProposalStatus.FAILED
+    assert done.result == {"dry_run": True, "error_type": "ValueError",
+                           "error": "OPLIA_CICD__GITHUB_REPOSITORY is not set"}
+    assert ex.calls == []                                   # nothing was executed
+    assert gate.get(p.id).status is ProposalStatus.FAILED   # persisted, not EXECUTING
+    with pytest.raises(InvalidTransitionError):             # final: cannot be re-run
+        gate.execute(p.id, ex, "ops")
+    assert gate.verify_audit_chain() is True
+
+
 def test_idempotency_key_returns_original(gate):
     a = _propose(gate, key="drift:abc")
     b = _propose(gate, key="drift:abc")

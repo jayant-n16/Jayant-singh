@@ -444,16 +444,21 @@ class SafetyGate:
         if expired:
             raise ExpiredError(proposal_id)
 
-        if self.dry_run:
-            status = ProposalStatus.DRY_RUN
-            result: dict[str, Any] = {"dry_run": True, "plan": executor.describe(payload)}
-        else:
-            try:
+        # The proposal is now claimed as EXECUTING: whatever happens below (including a failing dry-run
+        # description, e.g. an unconfigured CI/CD target) must end in a final status, never leave it stuck.
+        result: dict[str, Any]
+        try:
+            if self.dry_run:
+                result = {"dry_run": True, "plan": executor.describe(payload)}
+                status = ProposalStatus.DRY_RUN
+            else:
                 result = executor(payload)
                 status = ProposalStatus.EXECUTED
-            except Exception as exc:  # executor failures are recorded, never swallowed silently
-                status = ProposalStatus.FAILED
-                result = {"error_type": type(exc).__name__, "error": str(exc)[:_MAX_ERROR_LEN]}
+        except Exception as exc:  # executor failures are recorded, never swallowed silently
+            status = ProposalStatus.FAILED
+            result = {"error_type": type(exc).__name__, "error": str(exc)[:_MAX_ERROR_LEN]}
+            if self.dry_run:
+                result = {"dry_run": True, **result}
 
         with session_scope(self._sf) as s:
             s.execute(

@@ -153,3 +153,44 @@ def test_dr_target_names_must_be_unique(tmp_path, monkeypatch):
     monkeypatch.setenv("OPLIA_DR_TARGETS", json.dumps([t, t]))
     with pytest.raises(ValueError, match="unique"):
         build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'd2.db'}", **OIDC))
+
+
+def test_execute_with_unconfigured_cicd_fails_cleanly(tmp_path, monkeypatch):
+    # Regression for the dev set-up: no GitHub/GitLab/Jenkins target configured.
+    import json
+    import time
+
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from oplia_ctl.auth import sign_webhook
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    class _Key:  # stands in for the JWKS lookup; the token signature is still verified
+        def __init__(self, k):
+            self.key = k
+
+    monkeypatch.setattr(jwt.PyJWKClient, "get_signing_key_from_jwt", lambda self, token: _Key(key.public_key()))
+    monkeypatch.setenv("OPLIA_SECRET_WEBHOOK_HMAC_SECRET", "s3cret")
+    app = build(Settings(environment="dev", database_url=f"sqlite:///{tmp_path / 'x.db'}", **OIDC))
+    client = TestClient(app)
+
+    def bearer(user, *roles):
+        now = int(time.time())
+        tok = jwt.encode({"iss": OIDC["oidc_issuer"], "aud": OIDC["oidc_audience"], "sub": user, "roles": list(roles),
+                          "iat": now, "exp": now + 300}, key, algorithm="RS256")
+        return {"Authorization": f"Bearer {tok}"}
+
+    body = json.dumps({"zone_name": "z1", "cloud": "aws", "account_id": "111122223333",
+                       "blueprint": "control-tower-standard", "target_cicd": "github"}).encode()
+    ts = str(int(time.time()))
+    p = client.post("/webhooks/drift", content=body, headers={
+        "Content-Type": "application/json", "X-OPLIA-Timestamp": ts, "X-OPLIA-Delivery": "d-1",
+        "X-OPLIA-Signature": sign_webhook("s3cret", ts, body)}).json()
+    approved = client.post(f"/proposals/{p['id']}/approve", json={}, headers=bearer("alice", "oplia-approver"))
+    assert approved.status_code == 200
+    r = client.post(f"/proposals/{p['id']}/execute", headers=bearer("bob", "oplia-operator"))
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "FAILED"
+    assert r.json()["result"]["error_type"] == "CICDNotConfiguredError"
