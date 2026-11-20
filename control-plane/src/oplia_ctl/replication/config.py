@@ -15,6 +15,7 @@ from oplia_ctl.replication.images import ImageSettings
 from oplia_ctl.replication.jobs import JobMachine
 from oplia_ctl.replication.objects import ObjectPair
 from oplia_ctl.replication.registries import RegistryReplicator, RegistrySettings
+from oplia_ctl.replication.velero import VeleroBackups, VeleroSettings
 
 ACTION_PIPELINE = "dr.pipeline"
 
@@ -30,12 +31,13 @@ class ReplicationSettings(BaseSettings):
     verify_readback: bool = True
     drills: DrillSettings | None = None                                 # JSON object
     registries: RegistrySettings | None = None                          # JSON object
+    velero: VeleroSettings | None = None                                # JSON object
 
     def enabled(self) -> bool:
         return bool(self.object_pairs or self.images or self.kafka_connect_url or self.job_modules_configured())
 
     def job_modules_configured(self) -> bool:
-        return self.drills is not None or self.registries is not None
+        return any(m is not None for m in (self.drills, self.registries, self.velero))
 
 
 def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
@@ -47,6 +49,8 @@ def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
         machines.append(RestoreDrills(cfg.drills, session_factory, audit=audit))
     if cfg.registries is not None:
         machines.append(RegistryReplicator(cfg.registries, session_factory, secrets=secrets, audit=audit))
+    if cfg.velero is not None:
+        machines.append(VeleroBackups(cfg.velero, session_factory, secrets=secrets, audit=audit))
     return {m.kind: m for m in machines}
 
 
