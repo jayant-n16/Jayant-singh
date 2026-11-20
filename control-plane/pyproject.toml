@@ -38,6 +38,7 @@ dev = [
   "mypy>=1.10",
   "bandit>=1.7",
   "pyyaml>=6.0",
+  "jsonschema==4.26.0",          # scripts/validate-crs.py (mesh CI) and its tests
   "types-PyYAML",
 ]
 
