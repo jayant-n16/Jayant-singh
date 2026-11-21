@@ -54,6 +54,11 @@ class KafkaConnect:
         body: dict[str, Any] = r.json()
         return body
 
+    def put_config(self, name: str, config: dict[str, str]) -> None:
+        """Create the connector, or update its configuration (idempotent: PUT /connectors/{name}/config)."""
+        self._client.request("PUT", f"{self._url}/connectors/{quote(name, safe='')}/config", json=config,
+                             expected={200, 201}, **self._auth())
+
     def act(self, name: str, action: str) -> None:
         n = quote(name, safe="")
         if action == "pause":

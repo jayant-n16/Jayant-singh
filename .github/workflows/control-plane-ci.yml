@@ -78,11 +78,14 @@ jobs:
           out=$(BAO_BIN="$RUNNER_TEMP/bao-bin/bao" scripts/test-openbao.sh "$RUNNER_TEMP/bao")
           echo "::add-mask::$(echo "$out" | sed -n 's/^export BAO_TOKEN=//p')"
           echo "$out" | sed 's/^export //' >> "$GITHUB_ENV"
-      - name: MongoDB 7.0 and CockroachDB 24.3 for the dr.resync integration tests
+      - name: MongoDB 7.0, CockroachDB 24.3 and a logical-replication PostgreSQL for integration tests
         run: |
           set -euo pipefail
           docker run -d --name oplia-mongo -p 27017:27017 mongo:7.0.14
           docker run -d --name oplia-crdb -p 26257:26257 cockroachdb/cockroach:v24.3.5 start-single-node --insecure
+          # PostgreSQL with wal_level=logical for the CDC lag-probe test (the service container cannot take -c flags)
+          docker run -d --name oplia-pg-logical -p 55433:5432 -e POSTGRES_PASSWORD=postgres postgres:16 \
+            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
           for i in $(seq 1 60); do
             docker exec oplia-mongo mongosh --quiet --eval 'db.runCommand({ping: 1}).ok' 2>/dev/null | grep -q 1 && break
             sleep 2
@@ -95,6 +98,9 @@ jobs:
           docker exec oplia-crdb ./cockroach version | head -1
           echo "OPLIA_TEST_MONGO_URL=mongodb://localhost:27017" >> "$GITHUB_ENV"
           echo "OPLIA_TEST_CRDB_URL=postgresql://root@localhost:26257/defaultdb?sslmode=disable" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do docker exec oplia-pg-logical pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
+          docker exec oplia-pg-logical psql -U postgres -tc "SHOW wal_level"
+          echo "OPLIA_TEST_PG_LOGICAL_URL=postgresql://postgres:postgres@localhost:55433/postgres" >> "$GITHUB_ENV"
       - name: Shell scripts (shellcheck)
         run: shellcheck scripts/*.sh deploy/vault/scripts/*.sh
       - name: Lint
