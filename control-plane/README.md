@@ -448,9 +448,9 @@ gated proposal run by the `oplia-dr-job-worker`, shown on the console's **Migrat
 | Job (`/dr/jobs/<kind>`) | PRD | What it does |
 |---|---|---|
 | `schema_synthesis` | FR-01 | Designs the target schema for any of the 41 engines in the matrix from a live PostgreSQL/MySQL catalog or DDL text; optional AI proposals for stored routines; optional DDL dry-run on PostgreSQL (rolled back) |
-| `schema_change`, `schema_contract` | FR-02 | Online DDL on PostgreSQL / MySQL: expand, keyset backfill, validate; contract separately approved |
+| `schema_change`, `schema_contract` | FR-02 | Online DDL on PostgreSQL / MySQL / SQL Server / Oracle: expand, keyset backfill, validate; contract separately approved. SQL Server and Oracle refuse (never fall back offline) on editions without online operations |
 | `cdc_pipeline`, `cdc_lag_probe` | FR-03 | Debezium (Kafka Connect), AWS DMS, Datastream, Azure DMS; source prerequisite checks; measured heartbeat lag (p50/p95/p99, SLO verdict) |
-| `oplia-migration-hydrator` (sidecar) | FR-04 | Debezium events -> documents / graph / embeddings -> target writers for the 10 paradigms |
+| `oplia-migration-hydrator` (sidecar) | FR-04 | Debezium events -> documents / graph / embeddings -> target writers for the 10 paradigms, incl. Cosmos DB for Table / Table Storage, Synapse dedicated / Fabric Warehouse MERGE (needs pyodbc + ODBC Driver 18 in the image) and Vertex AI Search |
 | `parity_check` | FR-05 | Exact, order-independent parity between any two SQL engines, listing missing/extra/changed keys and columns the target lacks. A completed comparison SUCCEEDS with verdict MATCH or DIFF (FAILED = it could not run); the cutover refuses anything but MATCH |
 | `cutover`, `failback` | FR-06 | Envoy TCP proxy switch (staged for read-only, one step for writes), reverse CDC kept 7 days, measured failback time |
 
@@ -461,8 +461,15 @@ Settings: `OPLIA_MIGRATION_ONLINE_DDL`, `_SYNTHESIS`, `_LAG_PROBE`, `_PARITY` (b
 **Not met or not built (evidence in docs/migration-engine.md):** zero ACCESS EXCLUSIVE locks on PostgreSQL
 (catalog-only locks of milliseconds remain, bounded by `lock_timeout`); a guaranteed p99 < 500 ms or < 5 s
 failback (both are measured per run, not promised); Temporal and Flink (replaced by the job runner and the
-sidecar's state table); Envoy protocol filters for shadow reads; Synapse/Fabric MERGE, Cosmos Table and Vertex
-AI Search row writers; Debezium/Kafka end-to-end runs; anything against a real cloud account.
+sidecar's state table); Envoy protocol filters for shadow reads; Debezium/Kafka end-to-end runs; the Synapse /
+Fabric writer against a real Synapse or Fabric endpoint (tested on SQL Server 2022's MERGE) and Vertex AI Search
+against the real API (tested against the SDK's request types); SQL Server Standard / Azure SQL and Oracle SE2 / EE /
+RAC online DDL (CI runs SQL Server 2022 Developer and Oracle Database Free 23); anything against a real cloud account.
+
+Databases engines `sqlserver` (`sqlserver://user:password@host:port/database`, pymssql) and `oracle`
+(`oracle://user:password@host:port/service_name`, python-oracledb thin) are accepted in `OPLIA_DATABASES` for
+health checks and online DDL; `dr_of` (DR consistency) is refused for them. The quotas and limits of 26 target
+services, read from their official pages, are in docs/migration-engine.md ("Quotas and limits").
 
 ## API
 
