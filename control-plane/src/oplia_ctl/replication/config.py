@@ -17,6 +17,7 @@ from oplia_ctl.replication.firewall import FirewallSettings, FirewallTranslator
 from oplia_ctl.replication.images import ImageSettings
 from oplia_ctl.replication.jobs import JobMachine
 from oplia_ctl.replication.objects import ObjectPair
+from oplia_ctl.replication.queues import QueueRelay, QueueSettings
 from oplia_ctl.replication.registries import RegistryReplicator, RegistrySettings
 from oplia_ctl.replication.vault_dr import VaultDrSettings, VaultSnapshots
 from oplia_ctl.replication.velero import VeleroBackups, VeleroSettings
@@ -40,13 +41,14 @@ class ReplicationSettings(BaseSettings):
     dns: DnsSettings | None = None                                      # JSON object
     firewall: FirewallSettings | None = None                            # JSON object
     fileshares: FileShareSettings | None = None                         # JSON object
+    queues: QueueSettings | None = None                                 # JSON object
 
     def enabled(self) -> bool:
         return bool(self.object_pairs or self.images or self.kafka_connect_url or self.job_modules_configured())
 
     def job_modules_configured(self) -> bool:
         return any(m is not None for m in (self.drills, self.registries, self.velero, self.vault, self.dns,
-                                           self.firewall, self.fileshares))
+                                           self.firewall, self.fileshares, self.queues))
 
 
 def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
@@ -68,6 +70,8 @@ def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
         machines.append(FirewallTranslator(cfg.firewall, session_factory, audit=audit))
     if cfg.fileshares is not None:
         machines.append(FileShareReplicator(cfg.fileshares, session_factory, audit=audit))
+    if cfg.queues is not None:
+        machines.append(QueueRelay(cfg.queues, session_factory, audit=audit))
     return {m.kind: m for m in machines}
 
 
