@@ -18,6 +18,29 @@ const status = { modules: [{
     state: { verdict: "FAILED", boot_seconds: 61.5, torn_down: true, checks: [{ passed: false, detail: "tcp 22: ConnectionRefusedError" }] } }],
 }] };
 
+const migration = { modules: [...status.modules, {
+  kind: "cdc_lag_probe", title: "CDC lag measurement (FR-03)", action: "migration.cdc_lag_probe", fields: [], summary: {},
+  jobs: [{ id: "j2", kind: "cdc_lag_probe", target: "src -> dst", status: "SUCCEEDED", step: "DONE", payload: {},
+    error: null, requested_by: "bob", created_at: "2026-11-21T11:00:00+00:00", updated_at: "2026-11-21T11:01:00+00:00",
+    state: { result: { p50_ms: 0.4, p99_ms: 7.3, samples: 40, verdict: "MEETS SLO" } } }] }] };
+
+describe("Migration", () => {
+  it("shows only migration modules with their measured evidence", async () => {
+    const { api } = fakeApi([{ method: "GET", path: "/dr/jobs", reply: migration }]);
+    renderAt(<DrJobs migration />, { api, user: me() });
+    expect(await screen.findByText("src -> dst")).toBeInTheDocument();
+    expect(screen.getByText(/lag p50 0.4 ms · p99 7.3 ms \(40 samples\) · MEETS SLO/)).toBeInTheDocument();
+    expect(screen.queryByText("ami-0123456789abcdef0")).not.toBeInTheDocument();
+  });
+
+  it("keeps migration modules off the DR page", async () => {
+    const { api } = fakeApi([{ method: "GET", path: "/dr/jobs", reply: migration }]);
+    renderAt(<DrJobs />, { api, user: me() });
+    expect(await screen.findByText("ami-0123456789abcdef0")).toBeInTheDocument();
+    expect(screen.queryByText("src -> dst")).not.toBeInTheDocument();
+  });
+});
+
 describe("DR jobs", () => {
   it("shows drill results including the teardown", async () => {
     const { api } = fakeApi([{ method: "GET", path: "/dr/jobs", reply: status }]);

@@ -102,6 +102,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
             {m.features.network ? <NavLink to="/network">Network</NavLink> : null}
             {m.features.replication ? <NavLink to="/replication">DR replication</NavLink> : null}
             {m.features.dr_jobs ? <NavLink to="/dr-jobs">DR jobs &amp; drills</NavLink> : null}
+            {m.features.dr_jobs ? <NavLink to="/migration">Migration</NavLink> : null}
             {m.features.integrations ? <NavLink to="/integrations">Integrations</NavLink> : null}
           </nav>
           <main id="main" className={conn.online ? "content" : "content stale"} aria-busy={!conn.online}>
@@ -114,6 +115,7 @@ function SignedIn({ config }: { config: ConsoleConfig }) {
               <Route path="/databases" element={<Feature on={m.features.databases === true} name="Databases"><Databases /></Feature>} />
               <Route path="/replication" element={<Feature on={m.features.replication === true} name="DR replication"><Replication /></Feature>} />
               <Route path="/dr-jobs" element={<Feature on={m.features.dr_jobs === true} name="DR jobs"><DrJobs /></Feature>} />
+              <Route path="/migration" element={<Feature on={m.features.dr_jobs === true} name="Migration"><DrJobs migration /></Feature>} />
               <Route path="/network" element={<Feature on={m.features.network === true} name="Network"><Network /></Feature>} />
               <Route path="/integrations" element={<Feature on={m.features.integrations === true} name="Integrations"><Integrations /></Feature>} />
               <Route path="/dr" element={<Feature on={m.features.dr} name="DR circuit breaker"><Dr /></Feature>} />
