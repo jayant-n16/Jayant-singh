@@ -11,6 +11,17 @@ export const MIGRATION_KINDS = ["schema_synthesis", "schema_change", "schema_con
 
 type Obj = Record<string, unknown>;
 
+/** Restore drills report {check: {...}, passed, detail}; online schema changes report {check: "what", offending_rows, passed}. */
+export interface CheckRow { check?: unknown; passed?: boolean; detail?: string; offending_rows?: number }
+
+export function checkText(c: CheckRow): string {
+  const rows = typeof c.offending_rows === "number" ? c.offending_rows : undefined;
+  const passed = typeof c.passed === "boolean" ? c.passed : rows === 0;
+  const label = typeof c.check === "string" ? c.check : (c.detail ?? "check");
+  const extra = rows !== undefined && rows > 0 ? ` (${rows} offending row${rows === 1 ? "" : "s"})` : "";
+  return `${passed ? "✓" : "✗"} ${label}${extra}`;
+}
+
 function detail(j: DrJob): string {
   const st = j.state;
   const parts: string[] = [];
@@ -27,9 +38,7 @@ function detail(j: DrJob): string {
   if (val) parts.push(`validated on ${String(val.database)}: ${String(val.failed)} failed of ${String(val.statements)}`);
   if (typeof st.verdict === "string") parts.push(`verdict ${st.verdict}`);
   if (typeof st.boot_seconds === "number") parts.push(`booted in ${st.boot_seconds}s`);
-  if (Array.isArray(st.checks)) {
-    for (const c of st.checks as { passed: boolean; detail: string }[]) parts.push(`${c.passed ? "✓" : "✗"} ${c.detail}`);
-  }
+  if (Array.isArray(st.checks)) for (const c of st.checks as CheckRow[]) parts.push(checkText(c));
   if (st.torn_down === true) parts.push("torn down");
   if (typeof st.cleanup_error === "string") parts.push(`cleanup error: ${st.cleanup_error}`);
   return parts.join(" · ");

@@ -891,7 +891,7 @@ class OnlineSchemaChange(_Base):
             results = []
             for c in plan.checks:
                 bad = int(r.scalar(c.sql) or 0)
-                results.append({"check": c.what, "offending_rows": bad})
+                results.append({"check": c.what, "offending_rows": bad, "passed": bad == 0})
                 if bad:
                     st["checks"] = results
                     raise ValueError(f"validation failed: {c.what}: {bad} offending rows")
@@ -951,7 +951,7 @@ class SchemaContract(_Base):
             res = []
             for c in plan.contract_checks:
                 bad = int(r.scalar(c.sql) or 0)
-                res.append({"check": c.what, "offending_rows": bad})
+                res.append({"check": c.what, "offending_rows": bad, "passed": bad == 0})
                 if bad:
                     raise ValueError(f"re-check failed before contract: {c.what}: {bad} rows")
             st["checks"] = res

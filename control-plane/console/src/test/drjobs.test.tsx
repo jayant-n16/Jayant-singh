@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import DrJobs from "../pages/DrJobs";
+import DrJobs, { checkText } from "../pages/DrJobs";
 import { fakeApi, me, renderAt } from "./helpers";
 
 const status = { modules: [{
@@ -31,6 +31,28 @@ describe("Migration", () => {
     expect(await screen.findByText("src -> dst")).toBeInTheDocument();
     expect(screen.getByText(/lag p50 0.4 ms · p99 7.3 ms \(40 samples\) · MEETS SLO/)).toBeInTheDocument();
     expect(screen.queryByText("ami-0123456789abcdef0")).not.toBeInTheDocument();
+  });
+
+  it("shows schema-change checks in the backend's real shape (stored jobs may lack 'passed')", async () => {
+    // exactly what migration/online_ddl.py stored before and after the fix
+    const checks = [{ check: "index ix_orders_customer is valid", offending_rows: 0 },
+      { check: "total__oplia_new matches total on every row", offending_rows: 0, passed: true },
+      { check: "email__oplia_new is not null", offending_rows: 3, passed: false }];
+    const reply = { modules: [{ kind: "schema_change", title: "Online schema change (FR-02)", action: "migration.schema_change",
+      fields: [], summary: {}, jobs: [{ id: "j3", kind: "schema_change", target: "shop-src", status: "SUCCEEDED", step: "DONE",
+        payload: {}, error: null, requested_by: "bob", created_at: "2026-11-21T12:30:00Z", updated_at: "2026-11-21T12:31:00Z",
+        state: { rows_backfilled: 20000, checks } }] }] };
+    const { api } = fakeApi([{ method: "GET", path: "/dr/jobs", reply }]);
+    renderAt(<DrJobs migration />, { api, user: me() });
+    const cell = await screen.findByText(/20000 rows backfilled/);
+    expect(cell.textContent).toContain("✓ index ix_orders_customer is valid");
+    expect(cell.textContent).toContain("✓ total__oplia_new matches total on every row");
+    expect(cell.textContent).toContain("✗ email__oplia_new is not null (3 offending rows)");
+    expect(cell.textContent).not.toContain("undefined");
+  });
+
+  it("checkText handles drill checks too", () => {
+    expect(checkText({ check: { kind: "tcp" }, passed: false, detail: "tcp 22: refused" })).toBe("✗ tcp 22: refused");
   });
 
   it("keeps migration modules off the DR page", async () => {

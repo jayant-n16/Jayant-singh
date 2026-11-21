@@ -311,7 +311,8 @@ def test_pg_expand_backfill_validate_contract_under_load(gate, session_factory, 
     assert max(lat) < 1.0, f"a writer waited {max(lat):.2f}s"
     assert any(not a["ok"] for a in st["attempts"]), "expected lock_timeout retries while the blocker held the table"
     assert st["rows_backfilled"] >= 5000 and st["awaiting_contract"] is True
-    assert all(c["offending_rows"] == 0 for c in st["checks"])
+    assert all(c["offending_rows"] == 0 and c["passed"] is True for c in st["checks"])
+    assert all(isinstance(c["check"], str) and c["check"] for c in st["checks"])
 
     with psycopg.connect(pg_app, autocommit=True) as c:
         # trigger keeps both columns in sync for writes made after EXPAND, both directions
