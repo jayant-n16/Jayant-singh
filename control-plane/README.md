@@ -408,6 +408,32 @@ exports longer than Cloud Build's 24-hour limit.
 **Not validated:** nothing in this section was run against a real AWS, Azure or GCP account or a
 real Kafka Connect cluster.
 
+## Zero-downtime migration engine
+
+Built from the "Universal Zero-Downtime Migration Engine" PRD; full status, limits and the vendor
+documentation used are in [docs/migration-engine.md](docs/migration-engine.md), and the local
+deploy-and-test steps in [docs/local-deploy-and-test.md](docs/local-deploy-and-test.md). Every job below is a
+gated proposal run by the `oplia-dr-job-worker`, shown on the console's **Migration** screen.
+
+| Job (`/dr/jobs/<kind>`) | PRD | What it does |
+|---|---|---|
+| `schema_synthesis` | FR-01 | Designs the target schema for any of the 41 engines in the matrix from a live PostgreSQL/MySQL catalog or DDL text; optional AI proposals for stored routines; optional DDL dry-run on PostgreSQL (rolled back) |
+| `schema_change`, `schema_contract` | FR-02 | Online DDL on PostgreSQL / MySQL: expand, keyset backfill, validate; contract separately approved |
+| `cdc_pipeline`, `cdc_lag_probe` | FR-03 | Debezium (Kafka Connect), AWS DMS, Datastream, Azure DMS; source prerequisite checks; measured heartbeat lag (p50/p95/p99, SLO verdict) |
+| `oplia-migration-hydrator` (sidecar) | FR-04 | Debezium events -> documents / graph / embeddings -> target writers for the 10 paradigms |
+| `parity_check` | FR-05 | Exact, order-independent parity between any two SQL engines, listing missing/extra/changed keys |
+| `cutover`, `failback` | FR-06 | Envoy TCP proxy switch (staged for read-only, one step for writes), reverse CDC kept 7 days, measured failback time |
+
+Settings: `OPLIA_MIGRATION_ONLINE_DDL`, `_SYNTHESIS`, `_LAG_PROBE`, `_PARITY` (booleans), `_CDC` and `_CUTOVER`
+(JSON objects), `_AI_PROVIDERS` (JSON list: anthropic / azure_openai / bedrock / vertex) and
+`_AI_ALLOW_SOURCE_CODE` (default false). Databases come from `OPLIA_DATABASES` with DSNs in the secret provider.
+
+**Not met or not built (evidence in docs/migration-engine.md):** zero ACCESS EXCLUSIVE locks on PostgreSQL
+(catalog-only locks of milliseconds remain, bounded by `lock_timeout`); a guaranteed p99 < 500 ms or < 5 s
+failback (both are measured per run, not promised); Temporal and Flink (replaced by the job runner and the
+sidecar's state table); Envoy protocol filters for shadow reads; Synapse/Fabric MERGE, Cosmos Table and Vertex
+AI Search row writers; Debezium/Kafka end-to-end runs; anything against a real cloud account.
+
 ## API
 
 | Method | Path | Auth |
