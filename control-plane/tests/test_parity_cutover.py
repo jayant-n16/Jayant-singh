@@ -100,9 +100,54 @@ def test_exact_parity_job_finds_the_changed_rows(gate, session_factory):
     m.run_pending()
     j = m.get(jid)
     t = j["state"]["result"]["tables"]["orders"]
-    assert j["status"] == "FAILED" and (t["changed"], t["missing_on_target"], t["extra_on_target"]) == (
-        [[1500]], [[42]], [[9999]])
-    assert events == [("migration.parity_check.succeeded", "MATCH"), ("migration.parity_check.failed", "DIFF")]
+    # a completed comparison SUCCEEDS; the verdict is the result (FAILED only when it cannot run)
+    assert j["status"] == "SUCCEEDED" and j["error"] is None and j["state"]["result"]["status"] == "DIFF"
+    assert (t["changed"], t["missing_on_target"], t["extra_on_target"]) == ([[1500]], [[42]], [[9999]])
+    assert t["status"] == "DIFF" and t["rows_match"] is False
+    assert events == [("migration.parity_check.succeeded", "MATCH"), ("migration.parity_check.succeeded", "DIFF")]
+
+    # a column the target lacks is a schema difference (it was compared out silently before)
+    with psycopg.connect(dsns["par_dst"], autocommit=True) as c:
+        c.execute("UPDATE orders SET total = 1500 * 1.25 WHERE id = 1500")
+        c.execute("INSERT INTO orders SELECT 42, 'sku42', 42 * 1.25, "
+                  "'2026-01-01'::timestamptz + 42 * interval '1 hour', true")
+        c.execute("DELETE FROM orders WHERE id = 9999")
+    with psycopg.connect(dsns["par_src"], autocommit=True) as c:
+        c.execute("ALTER TABLE orders ADD COLUMN total__oplia_new numeric(14,2)")
+    jid = m(m.parse({"source": "src", "target": "dst"}))["job_id"]
+    m.run_pending()
+    r = m.get(jid)["state"]["result"]
+    assert m.get(jid)["status"] == "SUCCEEDED" and r["status"] == "DIFF"
+    assert r["schema"] == [{"table": "orders", "issue": "columns not on target", "columns": ["total__oplia_new"]}]
+    o = r["tables"]["orders"]
+    assert o["columns_not_on_target"] == ["total__oplia_new"] and o["rows_match"] is True and o["status"] == "DIFF"
+
+    # the comparison itself failing (target database unreachable) is what FAILED means
+    bad = StaticSecretProvider({"s": dsns["par_src"], "d": dsns["par_dst"].rsplit("/", 1)[0] + "/no_such_db_xyz"})
+    reg._secrets = bad
+    jid = m(m.parse({"source": "src", "target": "dst"}))["job_id"]
+    m.run_pending()
+    assert m.get(jid)["status"] == "FAILED"
+
+
+def test_cutover_refuses_a_succeeded_parity_job_with_a_diff_verdict(session_factory, tmp_path):
+    cfg = ProxySettings(config_dir=str(tmp_path / "envoy"), clusters={"a": {"host": "db1", "port": 5432},
+                                                                     "b": {"host": "db2", "port": 5432}},
+                        listeners=[{"name": "ro", "port": 6432, "legacy": "a", "new": "b", "writes": False}])
+
+    class NoTraffic:
+        def __getattr__(self, name):
+            raise AssertionError(f"the router must not be touched ({name})")
+
+    lag = {"status": "SUCCEEDED", "state": {"result": {"p99_ms": 120.0, "not_arrived_within_timeout": 0}}}
+    par = {"status": "SUCCEEDED", "state": {"result": {"status": "DIFF", "schema": [], "tables": {}}}}
+    jobs = {("cdc_lag_probe", "1" * 36): lag, ("parity_check", "2" * 36): par}
+    m = Cutover(CutoverSettings(proxy=cfg), session_factory, NoTraffic(), lambda k, j: jobs[(k, j)])
+    jid = m(m.parse({"listener": "ro", "spec": {"lag_job": "1" * 36, "parity_job": "2" * 36}}))["job_id"]
+    m.run_pending()
+    j = m.get(jid)
+    assert j["status"] == "FAILED" and "parity evidence not MATCH" in j["error"]
+    assert j["state"]["precheck"]["problems"] == ["parity evidence not MATCH: SUCCEEDED"]
 
 
 @pytest.mark.skipif(not (PG_URL and MYSQL_PORT), reason="needs PostgreSQL and MySQL")

@@ -103,9 +103,14 @@ Expected output (from the verification run):
 
 ```
 {"job": "schema_synthesis", "status": "SUCCEEDED", "error": null, "validation": {"database": "shop-scratch", "statements": 3, "failed": 0}}
-{"job": "schema_change", "status": "SUCCEEDED", "error": null, "rows_backfilled": 20000, "checks": [{"check": "index ix_orders_customer is valid", "offending_rows": 0}, {"check": "total__oplia_new matches total on every row", "offending_rows": 0}]}
-{"job": "parity_check", "status": "SUCCEEDED", "error": null, "result": {"tables": {"orders": {"source_rows": 20000, "target_rows": 20000, "columns_compared": 3, "columns_not_on_target": ["total__oplia_new"], "differing_buckets": 0, "status": "MATCH"}}, "schema": [], "status": "MATCH"}}
+{"job": "schema_change", "status": "SUCCEEDED", "error": null, "rows_backfilled": 20000, "checks": [{"check": "index ix_orders_customer is valid", "offending_rows": 0, "passed": true}, {"check": "total__oplia_new matches total on every row", "offending_rows": 0, "passed": true}]}
+{"job": "parity_check", "status": "SUCCEEDED", "error": null, "result": {"tables": {"orders": {"source_rows": 20000, "target_rows": 20000, "columns_compared": 3, "columns_not_on_target": ["total__oplia_new"], "differing_buckets": 0, "rows_match": true, "status": "DIFF"}}, "schema": [{"table": "orders", "issue": "columns not on target", "columns": ["total__oplia_new"]}], "status": "DIFF"}}
 ```
+
+The parity verdict is **DIFF** on purpose: the schema change expanded `orders` on `shop-src` with the new
+column `total__oplia_new`, which `shop-target` does not have, so the comparison reports it under `schema`
+(all 20,000 rows match on the shared columns: `rows_match: true`). A completed comparison is a SUCCEEDED
+job whatever its verdict; FAILED means the comparison could not run. A cutover refuses anything but MATCH.
 
 ## 9. The console
 

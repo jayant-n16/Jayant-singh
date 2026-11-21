@@ -10,7 +10,7 @@ const TONE: Record<string, string> = {
   FAILED: "danger", GRANT_FAILED: "danger",
   SUCCEEDED: "ok", PAUSED: "warn", PARTIAL: "warn", QUEUED: "info", HEALTHY: "ok", UNHEALTHY: "danger", AVAILABLE: "ok", FAILING: "danger",
   OK: "ok", CONFIGURED: "info", ERROR: "danger", NOT_CONFIGURED: "muted",
-  CONNECTED: "ok", UNREACHABLE: "danger", CONSISTENT: "ok", DRIFT: "danger",
+  CONNECTED: "ok", UNREACHABLE: "danger", CONSISTENT: "ok", DRIFT: "danger", MATCH: "ok", DIFF: "danger",
   RUNNING: "ok", STOPPED: "muted", TERMINATED: "muted", STOPPING: "warn", STARTING: "warn",
 };
 

@@ -123,7 +123,11 @@ def compare_exact(src: tuple[Any, str, str | None], dst: tuple[Any, str, str | N
             entry["extra_on_target"] = [json.loads(k) for k in keys if k not in per[0]][:max_keys]
             entry["changed"] = [json.loads(k) for k in keys if k in per[0] and k in per[1]
                                 and per[0][k] != per[1][k]][:max_keys]
-        entry["status"] = "MATCH" if not diff_b and counts[0] == counts[1] else "DIFF"
+        rows_match = not diff_b and counts[0] == counts[1]
+        entry["rows_match"] = rows_match
+        if missing_cols:  # a column the target lacks is a schema difference, not something to hide
+            out["schema"].append({"table": t, "issue": "columns not on target", "columns": missing_cols})
+        entry["status"] = "MATCH" if rows_match and not missing_cols else "DIFF"
         out["tables"][t] = entry
     out["status"] = "MATCH" if not out["schema"] and all(v["status"] != "DIFF" for v in out["tables"].values()) \
         else "DIFF"
@@ -189,7 +193,8 @@ def compare_vectors(pairs: list[tuple[str, list[float], list[float]]], threshold
 
 class ParityCheck(JobMachine):
     """Exact parity between two registered SQL databases (read-only on both). Result in the job state and the
-    audit log; a DIFF fails the job so the cutover precheck (FR-06) refuses to proceed."""
+    audit log. The job SUCCEEDS with verdict MATCH or DIFF (FAILED only when the comparison could not run); the
+    cutover precheck (FR-06) refuses to proceed unless the verdict is MATCH."""
 
     kind = "parity_check"
     action = ACTION_PARITY
@@ -239,8 +244,9 @@ class ParityCheck(JobMachine):
                 dc.close()
         finally:
             sc.close()
-        if st["result"]["status"] != "MATCH":
-            raise ValueError(f"parity DIFF: {json.dumps(st['result'])[:900]}")
+        # A completed comparison is a SUCCEEDED job whatever the verdict: the verdict (MATCH or DIFF) is the
+        # result. FAILED means the comparison itself could not run. The cutover precheck (FR-06) requires
+        # a SUCCEEDED parity job whose result is MATCH, so a DIFF still blocks the cutover.
         return "DONE"
 
     def finish(self, job: Any) -> None:

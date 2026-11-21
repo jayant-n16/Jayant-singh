@@ -451,7 +451,7 @@ gated proposal run by the `oplia-dr-job-worker`, shown on the console's **Migrat
 | `schema_change`, `schema_contract` | FR-02 | Online DDL on PostgreSQL / MySQL: expand, keyset backfill, validate; contract separately approved |
 | `cdc_pipeline`, `cdc_lag_probe` | FR-03 | Debezium (Kafka Connect), AWS DMS, Datastream, Azure DMS; source prerequisite checks; measured heartbeat lag (p50/p95/p99, SLO verdict) |
 | `oplia-migration-hydrator` (sidecar) | FR-04 | Debezium events -> documents / graph / embeddings -> target writers for the 10 paradigms |
-| `parity_check` | FR-05 | Exact, order-independent parity between any two SQL engines, listing missing/extra/changed keys |
+| `parity_check` | FR-05 | Exact, order-independent parity between any two SQL engines, listing missing/extra/changed keys and columns the target lacks. A completed comparison SUCCEEDS with verdict MATCH or DIFF (FAILED = it could not run); the cutover refuses anything but MATCH |
 | `cutover`, `failback` | FR-06 | Envoy TCP proxy switch (staged for read-only, one step for writes), reverse CDC kept 7 days, measured failback time |
 
 Settings: `OPLIA_MIGRATION_ONLINE_DDL`, `_SYNTHESIS`, `_LAG_PROBE`, `_PARITY` (booleans), `_CDC` and `_CUTOVER`

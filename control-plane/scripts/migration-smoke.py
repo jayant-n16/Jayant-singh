@@ -93,7 +93,7 @@ def main() -> None:
         if "validation" in summary:
             summary["validation"] = {k: summary["validation"][k] for k in ("database", "statements", "failed")}
         print(json.dumps({"job": kind, "status": j["status"], "error": j["error"], **summary}, default=str)[:1500])
-        ok = ok and (j["status"] == "SUCCEEDED" or kind == "parity_check")
+        ok = ok and j["status"] == "SUCCEEDED"   # a parity DIFF is a SUCCEEDED job with result.status DIFF
     sys.exit(0 if ok else 1)
 
 

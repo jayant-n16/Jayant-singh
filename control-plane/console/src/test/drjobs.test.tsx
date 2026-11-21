@@ -51,6 +51,22 @@ describe("Migration", () => {
     expect(cell.textContent).not.toContain("undefined");
   });
 
+  it("a parity DIFF is a completed job: SUCCEEDED with a DIFF verdict and the schema/table differences", async () => {
+    const result = { status: "DIFF", schema: [{ table: "orders", issue: "columns not on target", columns: ["total__oplia_new"] }],
+      tables: { orders: { source_rows: 20000, target_rows: 20000, columns_compared: 3, columns_not_on_target: ["total__oplia_new"],
+        differing_buckets: 0, rows_match: true, status: "DIFF" } } };
+    const reply = { modules: [{ kind: "parity_check", title: "Parity check (FR-05)", action: "migration.parity_check",
+      fields: [], summary: {}, jobs: [{ id: "j4", kind: "parity_check", target: "shop-src -> shop-target", status: "SUCCEEDED",
+        step: "DONE", payload: {}, error: null, requested_by: "bob", created_at: "2026-11-21T12:30:00Z",
+        updated_at: "2026-11-21T12:31:00Z", state: { result } }] }] };
+    const { api } = fakeApi([{ method: "GET", path: "/dr/jobs", reply }]);
+    renderAt(<DrJobs migration />, { api, user: me() });
+    expect(await screen.findByText("SUCCEEDED")).toBeInTheDocument();
+    expect(screen.getByText("DIFF", { selector: ".badge" })).toHaveClass("badge-danger");
+    expect(screen.getByText(/parity verdict DIFF · tables differing: orders · schema: orders columns not on target \(total__oplia_new\)/))
+      .toBeInTheDocument();
+  });
+
   it("checkText handles drill checks too", () => {
     expect(checkText({ check: { kind: "tcp" }, passed: false, detail: "tcp 22: refused" })).toBe("✗ tcp 22: refused");
   });

@@ -29,7 +29,15 @@ function detail(j: DrJob): string {
   if (typeof res.p99_ms === "number") parts.push(`lag p50 ${String(res.p50_ms)} ms · p99 ${res.p99_ms} ms (${String(res.samples)} samples)`);
   if (typeof res.applied_ms === "number") parts.push(`switch applied in ${res.applied_ms} ms`);
   if (typeof res.verdict === "string") parts.push(String(res.verdict));
-  if (typeof res.status === "string") parts.push(`parity ${res.status}`);
+  if (res.status === "MATCH" || res.status === "DIFF") {
+    const tables = (res.tables ?? {}) as Record<string, Obj>;
+    const differing = Object.entries(tables).filter(([, t]) => t.status === "DIFF").map(([n]) => n);
+    const schema = Array.isArray(res.schema) ? (res.schema as Obj[]) : [];
+    const bits = [`parity verdict ${res.status}`];
+    if (differing.length) bits.push(`tables differing: ${differing.join(", ")}`);
+    for (const i of schema) bits.push(`schema: ${String(i.table)} ${String(i.issue)}${Array.isArray(i.columns) ? ` (${i.columns.join(", ")})` : ""}`);
+    parts.push(bits.join(" · "));
+  }
   if (typeof st.rows_backfilled === "number") parts.push(`${st.rows_backfilled} rows backfilled`);
   if (st.awaiting_contract === true) parts.push("expanded: contract is a separate approval");
   const design = st.design as Obj | undefined;
@@ -42,6 +50,12 @@ function detail(j: DrJob): string {
   if (st.torn_down === true) parts.push("torn down");
   if (typeof st.cleanup_error === "string") parts.push(`cleanup error: ${st.cleanup_error}`);
   return parts.join(" · ");
+}
+
+/** The comparison verdict of a parity job (MATCH or DIFF), shown next to the job status. */
+export function verdictOf(j: DrJob): string | null {
+  const r = (j.state.result ?? {}) as Obj;
+  return j.kind === "parity_check" && (r.status === "MATCH" || r.status === "DIFF") ? r.status : null;
 }
 
 const DR_INTRO = "Long-running DR jobs run by the oplia-dr-job-worker CronJob one persisted step at a time. Starting one creates a proposal: another approver approves, an operator executes, then the worker takes over.";
@@ -79,7 +93,10 @@ export default function DrJobs({ migration = false }: { migration?: boolean }) {
               <tbody>{m.jobs.map((j) => (
                 <tr key={j.id}>
                   <td className="mono small wrap">{j.target}</td>
-                  <td><Badge value={j.status} /></td>
+                  <td>
+                    <Badge value={j.status} />
+                    {verdictOf(j) ? <> <Badge value={verdictOf(j)!} /></> : null}
+                  </td>
                   <td className="mono small">{j.step}</td>
                   <td className="small">{j.requested_by}</td>
                   <td className="small">{fmtTime(j.updated_at)}</td>
