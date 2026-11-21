@@ -12,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from oplia_ctl.replication.dns_failover import DnsFailover, DnsSettings
 from oplia_ctl.replication.drills import DrillSettings, RestoreDrills
+from oplia_ctl.replication.firewall import FirewallSettings, FirewallTranslator
 from oplia_ctl.replication.images import ImageSettings
 from oplia_ctl.replication.jobs import JobMachine
 from oplia_ctl.replication.objects import ObjectPair
@@ -36,12 +37,14 @@ class ReplicationSettings(BaseSettings):
     velero: VeleroSettings | None = None                                # JSON object
     vault: VaultDrSettings | None = None                                # JSON object
     dns: DnsSettings | None = None                                      # JSON object
+    firewall: FirewallSettings | None = None                            # JSON object
 
     def enabled(self) -> bool:
         return bool(self.object_pairs or self.images or self.kafka_connect_url or self.job_modules_configured())
 
     def job_modules_configured(self) -> bool:
-        return any(m is not None for m in (self.drills, self.registries, self.velero, self.vault, self.dns))
+        return any(m is not None for m in (self.drills, self.registries, self.velero, self.vault, self.dns,
+                                           self.firewall))
 
 
 def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
@@ -59,6 +62,8 @@ def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
         machines.append(VaultSnapshots(cfg.vault, session_factory, secrets=secrets, audit=audit))
     if cfg.dns is not None:
         machines.append(DnsFailover(cfg.dns, session_factory, audit=audit))
+    if cfg.firewall is not None:
+        machines.append(FirewallTranslator(cfg.firewall, session_factory, audit=audit))
     return {m.kind: m for m in machines}
 
 
