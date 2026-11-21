@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from oplia_ctl.migration.ai import AIProviderConfig
 from oplia_ctl.migration.cdc import CdcSettings
+from oplia_ctl.migration.cutover import CutoverSettings
 from oplia_ctl.replication.jobs import JobMachine
 
 
@@ -24,9 +25,12 @@ class MigrationSettings(BaseSettings):
     ai_allow_source_code: bool = False
     cdc: CdcSettings | None = None                               # FR-03 pipelines (JSON object)
     lag_probe: bool = False                                      # FR-03 lag measurement on OPLIA_DATABASES
+    parity: bool = False                                         # FR-05 exact parity on OPLIA_DATABASES
+    cutover: CutoverSettings | None = None                       # FR-06 Envoy cutover / failback (JSON object)
 
     def enabled(self) -> bool:
-        return self.online_ddl or self.synthesis or self.cdc is not None or self.lag_probe
+        return (self.online_ddl or self.synthesis or self.cdc is not None or self.lag_probe or self.parity
+                or self.cutover is not None)
 
 
 def build_migration_machines(session_factory: Any, secrets: Any = None,
@@ -87,4 +91,25 @@ def build_migration_machines(session_factory: Any, secrets: Any = None,
         if reg is None:
             raise ValueError("OPLIA_MIGRATION_LAG_PROBE needs OPLIA_DATABASES")
         out.append(CdcLagProbe(reg, session_factory, audit=audit))
+    if cfg.parity:
+        from oplia_ctl.migration.parity import ParityCheck
+
+        if reg is None:
+            raise ValueError("OPLIA_MIGRATION_PARITY needs OPLIA_DATABASES")
+        out.append(ParityCheck(reg, session_factory, audit=audit))
+    if cfg.cutover is not None:
+        from oplia_ctl.http import ResilientClient
+        from oplia_ctl.migration.cutover import Cutover, EnvoyRouter, Failback
+
+        by_kind = {m.kind: m for m in out}
+        if "cdc_lag_probe" not in by_kind or "parity_check" not in by_kind:
+            raise ValueError("cutover needs OPLIA_MIGRATION_LAG_PROBE and OPLIA_MIGRATION_PARITY (its evidence)")
+        kc = next((getattr(m, "kc", None) for m in out if getattr(m, "kc", None) is not None), None)
+        router = EnvoyRouter(cfg.cutover.proxy, ResilientClient(timeout=5.0, max_retries=1))
+
+        def job(kind: str, jid: str) -> dict[str, Any]:
+            return by_kind[kind].get(jid)
+
+        out += [Cutover(cfg.cutover, session_factory, router, job, kafka_connect=kc, audit=audit),
+                Failback(cfg.cutover, session_factory, router, kafka_connect=kc, audit=audit)]
     return out
