@@ -148,7 +148,7 @@ export default function Replication() {
       {dlg?.kind === "image" && d ? (
         <ActionDialog title="Propose an image replication" confirmLabel="Create proposal"
           fields={[
-            { name: "source_cloud", label: "Source cloud", kind: "select", required: true, initial: "aws", options: [{ value: "aws", label: "AWS (AMI id)" }, { value: "azure", label: "Azure (snapshot/disk resource id)" }] },
+            { name: "source_cloud", label: "Source cloud", kind: "select", required: true, initial: "aws", options: [{ value: "aws", label: "AWS (AMI id)" }, { value: "azure", label: "Azure (snapshot/disk resource id)" }, { value: "gcp", label: "GCP (projects/P/global/images/I)" }] },
             { name: "source_id", label: "Source image", kind: "text", required: true, minLength: 3, maxLength: 512 },
             { name: "target_cloud", label: "Target cloud", kind: "select", required: true, initial: "gcp", options: (["aws", "azure", "gcp"] as const).filter((c) => d.image_targets[c]).map((c) => ({ value: c, label: c.toUpperCase() })) },
             { name: "name", label: "Target image name (lowercase, hyphens)", kind: "text", required: true, minLength: 2, maxLength: 63 },

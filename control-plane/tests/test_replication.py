@@ -845,7 +845,7 @@ def test_azure_blob_source_must_be_allowlisted(session_factory):
 def test_image_request_validation(session_factory):
     rep = ImageReplicator(CFG, session_factory, Clients())
     for args, msg in (
-        (("gcp", "projects/p/global/images/i", "aws", "web"), "GCP as a source"),
+        (("gcp", "projects/p/global/images/i", "aws", "web"), "projects/<project>/global/images"),
         (("aws", "i-123", "gcp", "web"), "AMI id"),
         (("azure", "/bad", "aws", "web"), "snapshot or disk"),
         (("aws", "ami-0123456789abcdef0", "aws", "web"), "same"),
@@ -894,7 +894,7 @@ def test_api_replication(gate, session_factory):
         headers=op,
         json={"source_cloud": "gcp", "source_id": "x" * 5, "target_cloud": "aws", "name": "web", "reason": "DR image"},
     )
-    assert r.status_code == 422 and "GCP as a source" in r.json()["detail"]
+    assert r.status_code == 422 and "projects/<project>/global/images" in r.json()["detail"]
     r = api.post(
         "/dr/replication/images",
         headers=op,

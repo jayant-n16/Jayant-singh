@@ -17,8 +17,14 @@ CronJob; one step per call, so a restart resumes where it stopped):
   raw disk by vhd.VhdImage (a differencing disk's parent is looked up next to it in the same
   container and must carry the UUID the child records). Only storage accounts listed in
   ``azure_source_accounts`` are accepted. For AWS a fixed VHD footer is written after the raw disk.
-* GCP as a source is refused: Compute Engine has no API that returns image bytes (``gcloud
-  compute images export`` runs a Cloud Build workflow on a temporary VM). Not implemented.
+* GCP image -> AWS / Azure : Compute Engine has no API that returns image bytes, so the documented
+  export is used: a Cloud Build build running Google's ``gce_vm_image_export`` step (the same tool as
+  ``gcloud compute images export``; it boots a temporary VM in the project) writes ``disk.raw`` as a
+  tar.gz into the GCP staging bucket. The worker polls the build, then streams ``disk.raw`` out of
+  the archive (Azure: fixed VHD page blob; AWS: raw + fixed VHD footer -> ImportImage). The export
+  archive is deleted after the target image exists. Restrictions from Google's documentation apply:
+  public Google images and Windows images with Google-provided licences cannot be exported, a build
+  lasts at most 24 h, and the Cloud Build / Compute Engine service accounts need the documented roles.
 
 Checksums: SHA-256 of the raw disk bytes is computed while streaming and the staged copy is read
 back and hashed again before the target image is created; a mismatch fails the job. Target
@@ -53,6 +59,8 @@ _AZ_SRC = re.compile(r"^/subscriptions/([0-9a-f-]{36})/resourceGroups/([^/]+)/pr
                      r"(snapshots|disks)/([^/]+)$", re.IGNORECASE)
 _AZ_BLOB = re.compile(r"^https://([a-z0-9]{3,24})\.blob\.core\.windows\.net/([a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?)/"
                       r"([A-Za-z0-9._/-]{1,900}\.vhd)$")
+_GCP_IMG = re.compile(r"^projects/([a-z][a-z0-9-]{4,28}[a-z0-9])/global/images/([a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)$")
+EXPORT_STEP = "gcr.io/compute-image-import/gce_vm_image_export:release"
 _NAME = re.compile(r"^[a-z][a-z0-9-]{0,61}[a-z0-9]$")
 
 
@@ -124,6 +132,28 @@ class CloudClients:
         from google.cloud import storage  # type: ignore[attr-defined]
         return storage.Client().bucket(name)
 
+    def cloud_build(self) -> Any:
+        """Cloud Build REST (v1) with Application Default Credentials: ``create(project, body)`` and
+        ``get(project, build_id)`` return the decoded JSON."""
+        import google.auth
+        from google.auth.transport.requests import AuthorizedSession
+
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        session = AuthorizedSession(creds)  # type: ignore[no-untyped-call]
+        base = "https://cloudbuild.googleapis.com/v1/projects"
+
+        class CB:
+            def create(self, project: str, body: dict[str, Any]) -> Any:
+                r = session.post(f"{base}/{project}/builds", json=body, timeout=60)
+                r.raise_for_status()
+                return r.json()
+
+            def get(self, project: str, build_id: str) -> Any:
+                r = session.get(f"{base}/{project}/builds/{build_id}", timeout=60)
+                r.raise_for_status()
+                return r.json()
+        return CB()
+
     def gcp_images(self) -> Any:
         from google.cloud import compute_v1
         return compute_v1.ImagesClient()
@@ -158,7 +188,10 @@ class CloudClients:
 def validate_request(source_cloud: str, source_id: str, target_cloud: str, name: str,
                      cfg: ImageSettings) -> None:
     if source_cloud == "gcp":
-        raise ValueError("GCP as a source is not supported: Compute Engine has no API that returns image bytes")
+        if not _GCP_IMG.match(source_id):
+            raise ValueError("GCP source must be projects/<project>/global/images/<image>")
+        if cfg.gcp is None:
+            raise ValueError("exporting a GCP image needs the gcp section (staging bucket)")
     if source_cloud == target_cloud:
         raise ValueError("source and target cloud are the same")
     if source_cloud == "aws" and not _AMI.match(source_id):
@@ -171,7 +204,7 @@ def validate_request(source_cloud: str, source_id: str, target_cloud: str, name:
             raise ValueError("blob path must not contain '..'")
         if m.group(1) not in cfg.azure_source_accounts:
             raise ValueError(f"storage account {m.group(1)!r} is not in azure_source_accounts")
-    if source_cloud not in ("aws", "azure") or target_cloud not in ("aws", "azure", "gcp"):
+    if source_cloud not in ("aws", "azure", "gcp") or target_cloud not in ("aws", "azure", "gcp"):
         raise ValueError("unknown cloud")
     if not _NAME.match(name):
         raise ValueError("name must be lowercase letters, digits and hyphens (2-63), starting with a letter")
@@ -202,6 +235,7 @@ class ImageReplicator:
         self.describe(payload)
         jid = str(uuid.uuid4())
         first = ("EXPORT" if payload["source_cloud"] == "aws"
+                 else "GCP_EXPORT" if payload["source_cloud"] == "gcp"
                  else "TRANSFER" if _AZ_BLOB.match(payload["source_id"]) else "GRANT")
         now = self._now()
         with self._sf() as s, s.begin():
@@ -297,6 +331,56 @@ class ImageReplicator:
         st["export_key"] = f"{st['prefix']}{st['export_task']}.raw"
         return "TRANSFER"
 
+    # --- GCP source (Cloud Build image export)
+    def _step_gcp_export(self, job: ImageJobRow, st: dict[str, Any]) -> str:
+        g = self.cfg.gcp
+        if g is None:
+            raise RuntimeError("gcp is not available (configuration or source changed)")
+        m = _GCP_IMG.match(job.source_id)
+        if m is None:
+            raise RuntimeError("source is not a GCP image path")
+        key = f"oplia-dr/{job.id}/export.tar.gz"
+        body = {"timeout": "7200s", "tags": ["gce-daisy", "gce-daisy-image-export", "oplia-dr"],
+                "steps": [{"name": EXPORT_STEP, "env": ["BUILD_ID=$BUILD_ID"],
+                           "args": ["-timeout=7000s", f"-source_image={job.source_id}", "-client_id=api",
+                                    f"-destination_uri=gs://{g.staging_bucket}/{key}"]}]}
+        op = self._c.cloud_build().create(m.group(1), body)
+        st.update(build_id=op["metadata"]["build"]["id"], build_project=m.group(1), export_key=key)
+        return "WAIT_GCP_EXPORT"
+
+    def _step_wait_gcp_export(self, job: ImageJobRow, st: dict[str, Any]) -> str:
+        b = self._c.cloud_build().get(st["build_project"], st["build_id"])
+        status = b.get("status")
+        if status in ("QUEUED", "PENDING", "WORKING", "STATUS_UNKNOWN"):
+            st["build_status"] = status
+            return "WAIT_GCP_EXPORT"
+        if status != "SUCCESS":
+            raise RuntimeError(f"Cloud Build image export {st['build_id']} {status}: {b.get('statusDetail', '')}")
+        st["build_status"] = status
+        return "TRANSFER"
+
+    def _gcs_disk_raw(self, st: dict[str, Any]) -> tuple[int, Readable, Callable[[], None]]:
+        g = self.cfg.gcp
+        if g is None:
+            raise RuntimeError("gcp is not available (configuration or source changed)")
+        fh = self._c.gcs_bucket(g.staging_bucket).blob(st["export_key"]).open("rb")
+        gz = gzip.GzipFile(fileobj=fh)
+        tar = tarfile.open(fileobj=gz, mode="r|")
+        member = tar.next()
+        if member is None or member.name.lstrip("./") != "disk.raw" or not member.isfile():
+            tar.close()
+            fh.close()
+            raise RuntimeError("the export archive does not start with a regular file disk.raw")
+        f = tar.extractfile(member)
+        if f is None:
+            raise RuntimeError("disk.raw could not be read from the export archive")
+
+        def close() -> None:
+            tar.close()
+            gz.close()
+            fh.close()
+        return int(member.size), f, close
+
     # --- Azure source
     def _az_src(self, job: ImageJobRow) -> tuple[str, str, str, str]:
         m = _AZ_SRC.match(job.source_id)
@@ -329,6 +413,9 @@ class ImageReplicator:
             s3 = self._c.s3(aws.region)
             obj = s3.get_object(Bucket=aws.staging_bucket, Key=st["export_key"])
             return int(obj["ContentLength"]), obj["Body"], lambda: b"", lambda: None
+        if job.source_cloud == "gcp":
+            size, f, close = self._gcs_disk_raw(st)
+            return size, f, lambda: build_footer(size), close
         blob = _AZ_BLOB.match(job.source_id)
         if blob is not None:
             img = VhdImage(*self._blob_ranges(blob.group(1), blob.group(2), blob.group(3)))
@@ -511,6 +598,11 @@ class ImageReplicator:
         st["import_task"] = r["ImportTaskId"]
         return "WAIT_CREATE"
 
+    def _drop_gcp_export(self, job: ImageJobRow, st: dict[str, Any]) -> None:
+        if job.source_cloud == "gcp" and self.cfg.gcp is not None and st.get("export_key"):
+            self._c.gcs_bucket(self.cfg.gcp.staging_bucket).blob(st["export_key"]).delete()
+            st["export_deleted"] = True
+
     def _step_wait_create(self, job: ImageJobRow, st: dict[str, Any]) -> str:
         if job.target_cloud == "azure":
             az = self.cfg.azure
@@ -520,6 +612,7 @@ class ImageReplicator:
             ps = img.properties.provisioning_state if img.properties else None
             if ps == "Succeeded":
                 st["image_id"] = img.id
+                self._drop_gcp_export(job, st)
                 return "DONE"
             if ps in ("Failed", "Canceled"):
                 raise RuntimeError(f"Azure image provisioning {ps}")
@@ -547,6 +640,7 @@ class ImageReplicator:
             ec2.create_tags(Resources=[ami], Tags=[{"Key": k, "Value": v} for k, v in self._tags(job, "aws").items()])
             self._c.s3(aws.region).delete_object(Bucket=aws.staging_bucket, Key=st["staged"])
             st["image_id"] = ami
+            self._drop_gcp_export(job, st)
             return "DONE"
         if status in ("deleted", "deleting") or t.get("StatusMessage", "").lower().startswith("clienterror"):
             raise RuntimeError(f"import task {status}: {t.get('StatusMessage', '')}")
