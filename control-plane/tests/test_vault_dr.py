@@ -126,7 +126,14 @@ def test_snapshot_restore_into_dr_cluster_end_to_end(clusters, session_factory, 
     src, dst = clusters
     mount = src.call("POST", "/v1/sys/mounts/secret", json={"type": "kv", "options": {"version": "2"}})
     assert mount.status_code == 204
-    assert src.call("POST", "/v1/secret/data/app/db", json={"data": {"password": "s3cr3t-v1"}}).status_code == 200
+    # a new KV v2 mount upgrades itself in the background and answers 400 until it is ready
+    for _ in range(100):
+        w = src.call("POST", "/v1/secret/data/app/db", json={"data": {"password": "s3cr3t-v1"}})
+        if w.status_code == 200:
+            break
+        assert w.status_code == 400, w.text
+        time.sleep(0.1)
+    assert w.status_code == 200, w.text
     store = MemStore(STORE)
     events: list = []
     vs = VaultSnapshots(_cfg(src, dst, allow_restore=True), session_factory,
