@@ -1092,6 +1092,10 @@ def _timeseries(s: SourceSchema, target: str, d: Design) -> None:
         if target == "azure_data_explorer":
             cols = ", ".join(f"['{c}']:{_KUSTO.get(k, 'string')}" for c, k in kinds.items())
             d.ddl.append(f".create table ['{tn}'] ({cols})")
+            mapping = json.dumps([{"column": c, "Properties": {"path": f"$.{c}"}} for c in kinds],
+                                 separators=(",", ":"))
+            d.ddl.append(f".create table ['{tn}'] ingestion json mapping 'oplia_json' '{mapping}'")
+            d.ddl.append(f".alter table ['{tn}'] policy streamingingestion enable")
             continue
         if ts is None:
             d.warnings.append(f"{tn}: no timestamp column; not a time-series table for Timestream (skipped)")

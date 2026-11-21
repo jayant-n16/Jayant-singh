@@ -14,6 +14,7 @@ import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models
 import oplia_ctl.inventory.models
+import oplia_ctl.migration.models
 import oplia_ctl.network.models
 import oplia_ctl.replication.models
 import oplia_ctl.safety.models  # noqa: F401

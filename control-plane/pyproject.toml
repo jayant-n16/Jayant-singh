@@ -34,6 +34,10 @@ dr = ["sqlglot>=25", "pymongo>=4.6", "confluent-kafka>=2.4", "PyMySQL>=1.1",
       "azure-storage-blob==12.31.1", "google-cloud-storage==3.17.1",
       "azure-servicebus==7.15.0", "google-cloud-pubsub==2.43.0",
       "google-cloud-datastream==1.20.0", "azure-mgmt-datamigration==10.1.0"]
+# Target SDKs for the CDC hydration sidecar (FR-04): installed only where the sidecar runs.
+targets = ["redis==8.1.0", "azure-cosmos==4.17.1", "google-cloud-firestore==2.34.1", "google-cloud-bigtable==2.50.2",
+           "google-cloud-spanner==3.71.0", "google-cloud-bigquery==3.47.0", "gremlinpython==3.8.2",
+           "cassandra-driver==3.30.1"]
 dev = [
   "pytest>=8.0",
   "respx>=0.21",
@@ -64,6 +68,7 @@ oplia-db-consistency = "oplia_ctl.databases.config:consistency_main"
 oplia-dr-object-plan = "oplia_ctl.replication.config:object_plan_main"
 oplia-dr-image-worker = "oplia_ctl.replication.config:image_worker_main"
 oplia-dr-job-worker = "oplia_ctl.replication.config:job_worker_main"
+oplia-migration-hydrator = "oplia_ctl.migration.sidecar:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

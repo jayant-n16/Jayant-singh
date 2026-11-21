@@ -58,7 +58,7 @@ def session_factory(tmp_path, _pg_engine) -> Iterator[sessionmaker[Session]]:
                               "jit_access_requests, dr_breaker_state, dr_incidents, "
                               "db_health_checks, db_consistency_runs, network_dial_changes, "
                               "dr_object_manifest, dr_replication_runs, dr_image_jobs, dr_jobs, "
-                              "inventory_instances, inventory_scans "
+                              "inventory_instances, inventory_scans, migration_hydration_docs "
                               "RESTART IDENTITY"))
         yield make_session_factory(_pg_engine)
         return

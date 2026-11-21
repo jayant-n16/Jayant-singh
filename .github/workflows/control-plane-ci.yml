@@ -41,7 +41,8 @@ jobs:
       - name: System packages (python-ldap build headers, OpenLDAP for AD-driver integration tests)
         run: |
           sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q libldap-dev libsasl2-dev slapd ldap-utils shellcheck qemu-utils
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q libldap-dev libsasl2-dev slapd ldap-utils shellcheck qemu-utils \
+            redis-server
           sudo systemctl stop slapd || true
           # the packaged AppArmor profile only allows slapd's default paths; the test server runs from RUNNER_TEMP
           if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true; fi
@@ -49,7 +50,7 @@ jobs:
           sudo systemctl stop mysql || true
           if [ -f /etc/apparmor.d/usr.sbin.mysqld ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mysqld || true; fi
       - name: Install
-        run: python -m pip install --upgrade pip && pip install -e ".[dev,postgres,gcp,ad,dr]"
+        run: python -m pip install --upgrade pip && CASS_DRIVER_NO_CYTHON=1 pip install -e ".[dev,postgres,gcp,ad,dr,targets]"
       - name: Start test LDAP server
         run: scripts/test-slapd.sh "$RUNNER_TEMP/slapd" | sed 's/^export //' >> "$GITHUB_ENV"
       - name: Start test MySQL server
