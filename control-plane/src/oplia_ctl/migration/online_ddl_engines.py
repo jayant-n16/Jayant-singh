@@ -101,6 +101,25 @@ def oracle_caps(conn: Any) -> Caps:
     return Caps(online=not se2, detail=banner[:200])
 
 
+def oracle_compile_errors(conn: Any, sql: str, schema: str | None) -> str | None:
+    """Oracle creates a trigger that does not compile ("created with compilation errors") without raising;
+    read ALL_ERRORS right after CREATE TRIGGER so EXPAND fails at once instead of every later write."""
+    import re as _re
+
+    m = _re.match(r'CREATE OR REPLACE TRIGGER (?:"(\w+)"\.)?"(\w+)"', sql)
+    if not m:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT line, position, text FROM all_errors WHERE owner = NVL(:1, SYS_CONTEXT('USERENV', "
+                    "'CURRENT_SCHEMA')) AND name = :2 AND type = 'TRIGGER' ORDER BY sequence",
+                    [m.group(1) or schema, m.group(2)])
+        errs = cur.fetchall()
+    finally:
+        cur.close()
+    return "; ".join(f"line {ln} col {pos}: {str(t).strip()}" for ln, pos, t in errs)[:1000] or None
+
+
 def retryable_code(engine: str, e: Exception) -> bool:
     if engine == "sqlserver":
         args: tuple[Any, ...] = tuple(getattr(e, "args", ()))
@@ -552,6 +571,8 @@ def sync_trigger(engine: str, table: str, trig: str, q: Callable[[str], str], ol
     else:
         fill = o._expr_sql(node, engine, "OPLIA_NEW_ROW").replace('"OPLIA_NEW_ROW".', ":NEW.").replace(
             "OPLIA_NEW_ROW.", ":NEW.")
-        body = f":NEW.{q(new)} := {fill};"
+        # evaluated by the SQL engine (SELECT ... FROM dual) so SQL-only forms such as CAST(x AS NUMBER(p))
+        # behave exactly as in the backfill UPDATE and the validation query
+        body = f"SELECT {fill} INTO :NEW.{q(new)} FROM dual;"  # nosec B608 - parsed expression, validated identifiers
     return [o.Stmt(f"CREATE OR REPLACE TRIGGER {trig} BEFORE INSERT OR UPDATE ON {table} FOR EACH ROW BEGIN "
                    f"{body} END;", ORA_DDL, "BEFORE ROW trigger keeps the new column in sync")]

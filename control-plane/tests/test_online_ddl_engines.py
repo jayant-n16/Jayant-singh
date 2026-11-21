@@ -124,7 +124,7 @@ def test_oracle_plan_uses_nonblocking_ddl_and_upper_case_names():
                            {"op": "change_type", "column": "amount", "type": "number(19)"}), "oracle", _ora_info(),
                    {}, ONLINE)
     assert "NOT NULL ENABLE NOVALIDATE)" in sql[4]
-    assert any(':NEW."AMOUNT__OPLIA_NEW" := CAST(:NEW."AMOUNT" AS NUMBER(19))' in s for s in sql)
+    assert any('SELECT CAST(:NEW."AMOUNT" AS NUMBER(19)) INTO :NEW."AMOUNT__OPLIA_NEW" FROM dual;' in s for s in sql)
     assert all(s.sql.endswith("VALIDATE") for s in p.validate)
     assert 'DROP INDEX "SYS_C001" ONLINE' in [s.sql for s in p.contract]
     assert 'ALTER TABLE "ORDERS" SET UNUSED ("NOTE") ONLINE' in [s.sql for s in p.contract]

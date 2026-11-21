@@ -741,6 +741,13 @@ class Runner:
         finally:
             if s.session:
                 self._mysql("SET SESSION foreign_key_checks = 1")
+        if self.engine == "oracle" and s.sql.startswith("CREATE OR REPLACE TRIGGER"):
+            from oplia_ctl.migration.online_ddl_engines import oracle_compile_errors
+
+            errs = oracle_compile_errors(self.conn, s.sql, self.change.schema_name.upper()
+                                         if self.change.schema_name else None)
+            if errs:
+                raise ValueError(f"Oracle trigger did not compile: {errs}")
 
     def _drop_invalid_index(self, s: Stmt) -> None:
         """A failed CREATE INDEX CONCURRENTLY leaves an INVALID index behind; remove it before a retry."""
