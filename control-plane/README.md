@@ -450,7 +450,7 @@ gated proposal run by the `oplia-dr-job-worker`, shown on the console's **Migrat
 | `schema_synthesis` | FR-01 | Designs the target schema for any of the 41 engines in the matrix from a live PostgreSQL/MySQL catalog or DDL text; optional AI proposals for stored routines; optional DDL dry-run on PostgreSQL (rolled back) |
 | `schema_change`, `schema_contract` | FR-02 | Online DDL on PostgreSQL / MySQL / SQL Server / Oracle: expand, keyset backfill, validate; contract separately approved. SQL Server and Oracle refuse (never fall back offline) on editions without online operations |
 | `cdc_pipeline`, `cdc_lag_probe` | FR-03 | Debezium (Kafka Connect), AWS DMS, Datastream, Azure DMS; source prerequisite checks; measured heartbeat lag (p50/p95/p99, SLO verdict) |
-| `oplia-migration-hydrator` (sidecar) | FR-04 | Debezium events -> documents / graph / embeddings -> target writers for the 10 paradigms, incl. Cosmos DB for Table / Table Storage, Synapse dedicated / Fabric Warehouse MERGE (needs pyodbc + ODBC Driver 18 in the image) and Vertex AI Search |
+| `oplia-migration-hydrator` (sidecar) | FR-04 | Debezium events -> documents / graph / embeddings -> target writers for the 10 paradigms, incl. Cosmos DB for Table / Table Storage, Synapse dedicated / Fabric Warehouse MERGE (pyodbc 5.4.0 + Microsoft ODBC Driver 18 in the image - see "ODBC Driver 18 licence" below) and Vertex AI Search |
 | `parity_check` | FR-05 | Exact, order-independent parity between any two SQL engines, listing missing/extra/changed keys and columns the target lacks. A completed comparison SUCCEEDS with verdict MATCH or DIFF (FAILED = it could not run); the cutover refuses anything but MATCH |
 | `cutover`, `failback` | FR-06 | Envoy TCP proxy switch (staged for read-only, one step for writes), reverse CDC kept 7 days, measured failback time |
 
@@ -589,3 +589,20 @@ environment. These need your DEV environment and credentials.
 Operational notes: AWS security groups are stateful (established connections can persist);
 the Kubernetes policy needs a CNI that enforces NetworkPolicy; a proposal left in `EXECUTING`
 after a crash is not auto-retried and must be reviewed manually.
+
+## ODBC Driver 18 licence
+
+The Synapse / Fabric Warehouse MERGE writer connects through pyodbc and the **Microsoft ODBC Driver 18 for SQL
+Server**, which is distributed under Microsoft's own licence (EULA), not this project's. The Dockerfile installs
+it only when the person building the image accepts that licence explicitly:
+
+```bash
+docker build --build-arg ACCEPT_MSODBCSQL18_EULA=Y -t oplia-control-plane control-plane
+```
+
+Without the build argument the image is built without the driver; everything else works and the warehouse writer
+fails with "Can't open lib 'ODBC Driver 18 for SQL Server'". The package comes from Microsoft's RHEL 9 repository
+(`https://packages.microsoft.com/config/rhel/9/prod.repo`) and is pinned with `--build-arg MSODBCSQL18_VERSION`
+(default `18.7.1.1-1`). CI builds the image with the licence accepted for its own test build and runs the MERGE
+writer from inside the image against SQL Server 2022 (`scripts/odbc-merge-smoke.py`).
+

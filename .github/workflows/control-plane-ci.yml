@@ -278,8 +278,24 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Build image
-        run: docker build -t oplia-control-plane:ci control-plane
+      - name: Build image (accepting the Microsoft ODBC Driver 18 EULA for this CI build)
+        run: docker build --build-arg ACCEPT_MSODBCSQL18_EULA=Y -t oplia-control-plane:ci control-plane
+      - name: Warehouse MERGE writer through pyodbc + ODBC Driver 18 inside the image, against SQL Server 2022
+        run: |
+          set -euo pipefail
+          pw="Op1$(openssl rand -hex 12)"
+          echo "::add-mask::$pw"
+          docker run -d --name oplia-mssql -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_PID=Developer \
+            -e "MSSQL_SA_PASSWORD=$pw" mcr.microsoft.com/mssql/server:2022-latest
+          for i in $(seq 1 90); do
+            docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -Q "SELECT 1" \
+              >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker run --rm --user 1001 oplia-control-plane:ci rpm -q msodbcsql18
+          docker run --rm --user 1001 --network host -v "$PWD/control-plane/scripts:/smoke:ro" \
+            -e "OPLIA_ODBC_CONN=DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;DATABASE=master;UID=sa;PWD=$pw;Encrypt=yes;TrustServerCertificate=yes" \
+            oplia-control-plane:ci python /smoke/odbc-merge-smoke.py
       - name: Smoke test image
         run: |
           docker run --rm --user 1001 oplia-control-plane:ci python -c "import oplia_ctl.main, oplia_ctl.soar.exporter, oplia_ctl.finops.config, google.cloud.asset_v1, google.cloud.compute_v1, azure.mgmt.compute, oplia_ctl.identity.config, oplia_ctl.identity.providers.ad, oplia_ctl.dr.config, sqlglot, bson, confluent_kafka, pymysql, ldap; print('import ok, python-ldap', ldap.__version__, 'OpenLDAP', ldap.VENDOR_VERSION)"
