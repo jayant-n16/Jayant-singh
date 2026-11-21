@@ -37,7 +37,7 @@ for key in circuit-breaker-key app-prod-data; do
 done
 
 # 4. policies
-for p in app-database-access oplia-control-plane ci-runner; do
+for p in app-database-access oplia-control-plane oplia-settings-writer ci-runner; do
   $V policy write "$p" "$POLICIES/$p.hcl"
 done
 if [ -n "$AUDIT_WARNING" ]; then echo "WARNING: $AUDIT_WARNING" >&2; fi

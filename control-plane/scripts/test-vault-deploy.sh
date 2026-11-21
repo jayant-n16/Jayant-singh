@@ -36,6 +36,11 @@ assert d["bound_service_account_names"] == ["app-service-account"], d
 assert d["bound_service_account_namespaces"] == ["production"], d
 assert d["token_policies"] == ["app-database-access"], d
 assert d["token_ttl"] == 3600 and d["token_max_ttl"] == 86400, d'
+"$V" read -format=json auth/kubernetes-aws/role/oplia-api | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["data"]
+assert d["bound_service_account_names"] == ["oplia-api"], d
+assert d["token_policies"] == ["oplia-control-plane", "oplia-settings-writer"], d'
 
 echo "== dynamic PostgreSQL credentials (dedicated admin role, rotate-root runs for real)"
 python3 - "$OPLIA_TEST_DATABASE_URL" <<'PY'
@@ -74,6 +79,12 @@ expect "$OPS" transit-dr-broker/keys/circuit-breaker-key deny control-plane
 expect "$OPS" sys/policies/acl/x deny control-plane
 expect "$OPS" auth/token/create deny control-plane
 expect "$CI" secret/data/coc/cicd/github read ci
+API=$("$V" token create -policy=oplia-control-plane -policy=oplia-settings-writer -ttl=10m -field=token)
+expect "$API" secret/data/coc/okta-api-token "create, read, update" api
+expect "$API" secret/metadata/coc/_pending/x/okta-api-token "delete, list, read" api
+expect "$API" secret/data/coc/root_token deny api
+expect "$API" secret/metadata/coc/okta-api-token list api
+expect "$OPS" secret/metadata/coc/_pending/x/okta-api-token list control-plane
 expect "$CI" secret/data/coc/okta-api-token deny ci
 
 echo "== a credential from the app policy logs in"

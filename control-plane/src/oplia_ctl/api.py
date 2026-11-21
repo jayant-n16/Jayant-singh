@@ -44,6 +44,8 @@ GET  /databases/consistency           operator/approver: DR consistency runs (?p
 POST /databases/{name}/consistency    operator/approver: compare a DR copy with its source now (audited)
 GET  /integrations                    operator/approver: status of clouds, CI/CD, IdPs, alerting, Vault (no secrets)
 POST /integrations/{name}/test        approver: send a test notification (Slack, PagerDuty, SIEM; audited)
+GET  /settings/integrations           approver: editable non-secret settings, their source, secret names + presence
+POST /settings/integrations/{name}    approver: propose a settings change (secrets staged in Vault only; gated)
 GET  /network/status                  operator/approver: Global Accelerator, Direct Connect, Consul, Linkerd
 POST /network/endpoint-groups/{key}/traffic-dial   operator/approver: propose a traffic-dial change (gated)
 GET  /dr/replication                  operator/approver: CDC pipelines, object pairs, image jobs
@@ -83,6 +85,13 @@ from oplia_ctl.dr.breaker import CircuitBreaker, list_incidents
 from oplia_ctl.finops.compliance import list_findings, list_scans
 from oplia_ctl.finops.optimizer import MaintenanceWindowClosedError, list_candidates
 from oplia_ctl.identity.jit import JitConflictError, JitRequestError, JitService
+from oplia_ctl.integration_settings import (
+    ACTION_INTEGRATION_SETTINGS,
+    MAX_BODY_BYTES,
+    IntegrationSettingsService,
+    SettingsError,
+    new_change_id,
+)
 from oplia_ctl.integrations import IntegrationRegistry
 from oplia_ctl.inventory.scanner import list_instances as list_inventory_instances
 from oplia_ctl.inventory.scanner import list_scans as list_inventory_scans
@@ -228,6 +237,7 @@ def create_app(
     db_registry: DatabaseRegistry | None = None,
     consistency: ConsistencyChecker | None = None,
     integrations: IntegrationRegistry | None = None,
+    integration_settings: IntegrationSettingsService | None = None,
     network: NetworkService | None = None,
     kafka_connect: KafkaConnect | None = None,
     object_replicator: ObjectReplicator | None = None,
@@ -598,6 +608,59 @@ def create_app(
         gate.record_event(actor=p.subject, event="integration_test_notification",
                           detail={"integration": name, "ok": ok, "error": error})
         return {"integration": name, "ok": ok, "detail": detail, "error": error}
+
+    # ------------------------------------------------------ integration settings
+    def _settings_svc() -> IntegrationSettingsService:
+        if integration_settings is None:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "integration settings not available")
+        return integration_settings
+
+    @app.get("/settings/integrations")
+    def settings_list(_: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        return _settings_svc().describe_all()
+
+    @app.post("/settings/integrations/{name}")
+    async def settings_propose(name: str, request: Request,
+                               p: Annotated[Principal, Depends(approver)]) -> dict[str, Any]:
+        svc = _settings_svc()
+        raw = await request.body()  # parsed here, not by FastAPI, so a validation error can never echo a secret
+        if len(raw) > MAX_BODY_BYTES:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request too large")
+        try:
+            body = json.loads(raw or b"null")
+        except json.JSONDecodeError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "body is not valid JSON") from None
+        try:
+            change = svc.parse(name, body)
+        except LookupError:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown integration") from None
+        except SettingsError as exc:
+            raise HTTPException(422, str(exc)) from None
+        finally:
+            body = None
+        svc.purge_stale_staging()
+        change_id = new_change_id()
+        proposal = gate.propose(action_type=ACTION_INTEGRATION_SETTINGS, target=f"integration {name}",
+                                payload=svc.payload(change, change_id, p.subject),
+                                reason=f"Integration settings ({name}): {change.reason}", requested_by=p.subject)
+        if change.secrets:
+            try:
+                svc.stage_secrets(change_id, change.secrets)
+            except Exception as exc:
+                change.secrets.clear()
+                try:
+                    svc.destroy_staging(change_id)
+                finally:
+                    gate.reject(proposal.id, "oplia-settings",
+                                f"secret staging in Vault failed ({type(exc).__name__}); nothing was changed")
+                detail = str(getattr(exc, "status", "")) or type(exc).__name__
+                raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                                    f"could not stage the secret(s) in Vault ({detail}); "
+                                    "the proposal was rejected and nothing was changed") from None
+            gate.record_event(actor=p.subject, event="settings_secrets_staged", proposal_id=proposal.id,
+                              detail={"integration": name, "secret_names": sorted(change.secrets)})
+            change.secrets.clear()
+        return _proposal_json(gate.get(proposal.id))
 
     # -------------------------------------------------------------- network
     def _network() -> NetworkService:

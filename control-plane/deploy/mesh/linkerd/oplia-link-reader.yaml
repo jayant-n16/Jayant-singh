@@ -21,3 +21,6 @@ subjects:
   - kind: ServiceAccount
     name: oplia-control-plane
     namespace: oplia-system
+  - kind: ServiceAccount
+    name: oplia-api               # the API serves the Network screen
+    namespace: oplia-system

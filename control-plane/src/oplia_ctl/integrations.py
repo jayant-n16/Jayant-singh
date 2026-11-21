@@ -68,9 +68,18 @@ class IntegrationRegistry:
                 missing.append(name)
         return missing
 
-    def status(self) -> list[dict[str, Any]]:
+    def replace_from(self, other: IntegrationRegistry) -> None:
+        """Swap in integrations rebuilt from new settings (after a console change was applied)."""
+        self._items = dict(other._items)
+
+    def status_of(self, names: list[str]) -> list[dict[str, Any]]:
+        return [r for r in self.status(names)]
+
+    def status(self, only: list[str] | None = None) -> list[dict[str, Any]]:
         out = []
-        for item in self._items.values():
+        for item in list(self._items.values()):
+            if only is not None and item.name not in only:
+                continue
             row: dict[str, Any] = {"name": item.name, "category": item.category, "target": item.target,
                                    "secrets": list(item.secrets), "can_test_notification": item.notify is not None
                                    and item.configured, "checked_at": datetime.now(UTC).isoformat()}

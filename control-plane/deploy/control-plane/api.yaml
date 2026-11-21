@@ -20,7 +20,7 @@ spec:
       labels:
         app.kubernetes.io/name: oplia-api
     spec:
-      serviceAccountName: oplia-control-plane
+      serviceAccountName: oplia-api
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -56,7 +56,7 @@ spec:
             - name: OPLIA_VAULT_AUTH_METHOD
               value: kubernetes
             - name: OPLIA_VAULT_KUBERNETES_ROLE
-              value: oplia-control-plane
+              value: oplia-api
             - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
               value: /var/run/secrets/vault/token
           resources:

@@ -8,7 +8,7 @@ Jobs: schema synthesis of a MySQL DDL for Cloud SQL for PostgreSQL (validated on
 back), an online schema change on the source table (expand, backfill, validate), a parity check, and a lag
 probe if a replica pair is configured. Usage:
 
-    python scripts/migration-smoke.py --api http://127.0.0.1:8000 --idp http://127.0.0.1:8090
+    python scripts/migration-smoke.py --api http://127.0.0.1:8080 --idp http://127.0.0.1:8090
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ def run_job(api: str, bob: str, alice: str, kind: str, params: dict, worker: lis
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--api", default="http://127.0.0.1:8000")
+    ap.add_argument("--api", default="http://127.0.0.1:8080")
     ap.add_argument("--idp", default="http://127.0.0.1:8090")
     ap.add_argument("--source", default="shop-src")
     ap.add_argument("--target", default="shop-target")

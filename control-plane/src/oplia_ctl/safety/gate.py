@@ -198,6 +198,11 @@ class SafetyGate:
         )
         head.last_hash = digest
 
+    @property
+    def clock(self) -> Callable[[], datetime]:
+        """The gate's clock (proposal expiry is decided against it)."""
+        return self._clock
+
     def record_event(self, *, actor: str, event: str, detail: dict[str, Any],
                      proposal_id: str | None = None) -> None:
         """Append an event to the hash-chained audit log (for actions outside a proposal, e.g. JIT revocation)."""

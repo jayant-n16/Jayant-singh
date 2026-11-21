@@ -17,6 +17,12 @@ for c in aws azure gcp ibm; do
     bound_service_account_namespaces=oplia-system \
     token_policies=oplia-control-plane \
     token_ttl=60m token_max_ttl=24h
+  # the API alone may write secrets entered in the console's integration settings (staged, then applied)
+  $V write "auth/kubernetes-$c/role/oplia-api" \
+    bound_service_account_names=oplia-api \
+    bound_service_account_namespaces=oplia-system \
+    token_policies=oplia-control-plane,oplia-settings-writer \
+    token_ttl=60m token_max_ttl=24h
 done
 for r in github-actions gitlab-ci jenkins; do
   $V write "auth/approle/role/$r" token_policies=ci-runner token_ttl=60m token_max_ttl=24h \

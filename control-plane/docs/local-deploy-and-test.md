@@ -19,15 +19,20 @@ wsl -d Ubuntu-24.04
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3-venv python3-dev postgresql-16 redis-server curl nodejs npm
+sudo apt-get install -y git python3-venv python3-dev postgresql redis-server curl
+node -v    # the console needs Node.js 20 or later
 ```
+
+Ubuntu's own `nodejs` package is older than 20 on some releases. If `node -v` prints nothing or a
+version below 20, install Node.js 22 LTS from https://nodejs.org before step 9. `postgresql` installs
+whichever version your Ubuntu ships (16 on 24.04, 18 on 26.04); the steps below do not depend on it.
 
 ## 3. PostgreSQL with logical replication (needed for CDC and the lag probe)
 
 ```bash
-sudo sed -i "s/^#\?wal_level.*/wal_level = logical/" /etc/postgresql/16/main/postgresql.conf
+sudo -u postgres psql -c "ALTER SYSTEM SET wal_level = logical"  # works for every PostgreSQL version
 sudo service postgresql restart
-sudo -u postgres psql -c "SHOW wal_level"                       # must print: logical
+sudo -u postgres psql -P pager=off -c "SHOW wal_level"           # must print: logical
 sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
 ```
 
@@ -77,9 +82,13 @@ export OPLIA_MIGRATION_ONLINE_DDL=true OPLIA_MIGRATION_SYNTHESIS=true OPLIA_MIGR
 ```bash
 . ~/oplia-env.sh && cd ~/Jayant-singh/control-plane && . .venv/bin/activate
 nohup oplia-dev-idp > ~/idp.log 2>&1 &
-nohup uvicorn oplia_ctl.main:app --host 127.0.0.1 --port 8000 > ~/api.log 2>&1 &
-sleep 3; curl -s http://127.0.0.1:8000/healthz          # {"status":"ok"}
+nohup uvicorn oplia_ctl.main:app --host 127.0.0.1 --port 8080 > ~/api.log 2>&1 &
+sleep 3; curl -s http://127.0.0.1:8080/healthz          # {"status":"ok"}
 ```
+
+The API listens on **8080** because the console's development server (step 9) forwards `/api` to
+`http://localhost:8080` (override with `OPLIA_API_URL`).
+
 
 ## 8. Run the migration smoke test
 
@@ -87,7 +96,7 @@ It signs in as bob (operator) and alice (approver) through the dev login, and fo
 approves it (alice), executes it (bob), runs the job worker and prints the result.
 
 ```bash
-python scripts/migration-smoke.py
+python scripts/migration-smoke.py --api http://127.0.0.1:8080 --idp http://127.0.0.1:8090
 ```
 
 Expected output (from the verification run):
@@ -109,6 +118,19 @@ nohup npx vite --host 127.0.0.1 > ~/vite.log 2>&1 &
 Open http://localhost:5173 in Windows, sign in as **bob**, open **Migration**. The jobs from step 8 are listed
 with their results. Propose a new job from there, sign out, sign in as **alice** to approve it, then as **bob**
 to execute it, and run `oplia-dr-job-worker` in WSL to advance it.
+
+## 9a. Integration settings in the console
+
+Sign in as **alice** (approver), open **Integrations** and press **Settings…** on a row (or
+**Database list…**). Change a value, give a reason and press **Propose change**. Then sign in as
+**carol** (another approver, also an operator) to approve and execute it; the proposal shows the
+integration's re-checked status. Values set this way take precedence over the `OPLIA_*` environment
+variables; restart the API and workers to make every process use them.
+
+On the laptop secrets come from `OPLIA_SECRET_<NAME>` variables (there is no Vault), so the dialog has no
+secret fields and says so: put the secret in `~/oplia-env.sh` (e.g.
+`export OPLIA_SECRET_SLACK_WEBHOOK_URL=...`) and restart the API. With Vault
+(`OPLIA_SECRET_PROVIDER=vault`) the dialog has write-only secret fields and values go only to Vault.
 
 ## 10. The full test suite (optional, ~10 minutes)
 

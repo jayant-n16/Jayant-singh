@@ -13,6 +13,7 @@ import oplia_ctl.databases.models
 import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models
+import oplia_ctl.integration_settings
 import oplia_ctl.inventory.models
 import oplia_ctl.migration.models
 import oplia_ctl.network.models

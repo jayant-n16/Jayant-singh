@@ -77,7 +77,7 @@ export function JsonBlock({ value }: { value: unknown }) {
 export interface Field {
   name: string;
   label: string;
-  kind: "text" | "textarea" | "number" | "select" | "checkbox" | "radio";
+  kind: "text" | "textarea" | "number" | "select" | "checkbox" | "radio" | "password";
   required?: boolean;
   minLength?: number;
   maxLength?: number;
@@ -184,7 +184,8 @@ export function ActionDialog({
                   </select>
                 ) : (
                   <input id={id} type={f.kind} required={f.required} minLength={f.minLength} maxLength={f.maxLength}
-                    min={f.min} max={f.max} value={String(v ?? "")} onChange={(e) => set(f.name, e.target.value)} />
+                    min={f.min} max={f.max} value={String(v ?? "")} onChange={(e) => set(f.name, e.target.value)}
+                    {...(f.kind === "password" ? { autoComplete: "new-password", spellCheck: false } : {})} />
                 )}
                 {f.help ? <small className="muted">{f.help}</small> : null}
               </div>

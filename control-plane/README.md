@@ -343,6 +343,36 @@ PagerDuty (an info-severity event that is resolved immediately with the same ded
 sink, and is recorded in the audit log as `integration_test_notification`. The console screen is
 "Integrations". Validated with respx/fakes only; not run against real Slack, PagerDuty or cloud accounts.
 
+## Integration settings (console)
+
+Approvers change the **non-secret** settings of each integration (clouds, CI/CD, Entra ID / Okta / AD,
+Slack / PagerDuty / SIEM, Vault, the database list) on the Integrations screen (**Settings…**).
+`GET /settings/integrations` lists each editable setting with its current value and where it comes
+from; `POST /settings/integrations/{name}` turns a change into a `settings.integration` proposal:
+four-eyes approval, kill switch and the hash-chained audit log apply as for every other action.
+
+* **Precedence:** applied in the console (table `integration_settings`, migration 0012) > environment
+  variable > built-in default. Applied values are written into the process environment at API start-up
+  before any settings object is built. `OPLIA_IGNORE_APPLIED_SETTINGS=true` starts without them (break-glass).
+* **When it takes effect:** at once in the API process that executed it (the integration's status check
+  is re-run and returned in the proposal result); workers, CronJobs and other API replicas after a restart.
+* **Not editable here:** database URL, console sign-in (OIDC), environment, dry-run/approval switches,
+  Vault KV prefix (`coc`) and field, and the secret *names*.
+* **Validation:** every change is checked by building all settings objects from the resulting
+  configuration (and `assert_production_safe` in prod) when proposed and again when executed.
+* **Secrets:** write-only; Vault only. Staged at `secret/data/coc/_pending/<change-id>/<name>` when proposed,
+  copied to `secret/data/coc/<name>` when the approved proposal executes, then the staged copy is destroyed
+  (all versions). Staged values of rejected, expired, failed or dry-run proposals are destroyed on the next
+  listing. Never in the database, the proposal payload, the audit log (names and Vault versions only) or API
+  responses; the request body is parsed by hand so validation errors cannot echo a value. Without Vault the
+  API refuses secrets and explains how to set `OPLIA_SECRET_<NAME>`; there is no fallback.
+* **Vault:** policy `deploy/vault/policies/oplia-settings-writer.hcl`, granted only to the API through the
+  new Kubernetes auth role and service account `oplia-api`; workers keep read-only `oplia-control-plane`.
+
+Validated: backend tests (secrets never stored, echoed or audited; four eyes; kill switch; validation;
+precedence and break-glass; staging clean-up), one test against a real OpenBao with the real policies,
+console tests and a Playwright test. Not run against a production Vault or Kubernetes cluster.
+
 ## Network layer
 
 * **Global entry** – `terraform/modules/aws-global-accelerator` (flow logs on, health checks on
@@ -444,6 +474,8 @@ AI Search row writers; Debezium/Kafka end-to-end runs; anything against a real c
 | POST | `/proposals/{id}/approve`, `/reject` | OIDC: approver |
 | POST | `/proposals/{id}/execute` | OIDC: operator |
 | GET | `/me` | OIDC: any signed-in user (subject, roles, what the console may offer) |
+| GET | `/settings/integrations` | OIDC: approver |
+| POST | `/settings/integrations/{name}` | OIDC: approver (creates a gated proposal) |
 | GET | `/kill-switch` | OIDC: operator or approver |
 | POST | `/kill-switch` | OIDC: approver |
 | GET | `/audit/events` | OIDC: approver (newest first; `before_seq`, `limit`, `proposal_id`) |

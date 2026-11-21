@@ -13,6 +13,7 @@ import oplia_ctl.databases.models
 import oplia_ctl.dr.models
 import oplia_ctl.finops.models
 import oplia_ctl.identity.models
+import oplia_ctl.integration_settings
 import oplia_ctl.inventory.models
 import oplia_ctl.migration.models
 import oplia_ctl.network.models
@@ -51,7 +52,13 @@ from oplia_ctl.http import ResilientClient
 from oplia_ctl.identity.config import IdentitySettings, build_providers
 from oplia_ctl.identity.jit import JitService, load_catalog
 from oplia_ctl.identity.sweep import ACTION_DISABLE_INACTIVE, DisableInactiveExecutor
-from oplia_ctl.integrations import build_integrations
+from oplia_ctl.integration_settings import (
+    ACTION_INTEGRATION_SETTINGS,
+    IntegrationSettingsExecutor,
+    IntegrationSettingsService,
+    apply_persisted_overrides,
+)
+from oplia_ctl.integrations import IntegrationRegistry, build_integrations
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
 from oplia_ctl.network.service import NetworkService, NetworkSettings, TrafficDialExecutor
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
@@ -172,6 +179,29 @@ def build(settings: Settings) -> FastAPI:
         settings=settings, secrets=secrets, client=client, finops_cfg=finops_cfg, providers=providers,
         identity_cfg=identity_cfg, aiops_cfg=aiops_cfg, soar_cfg=soar_cfg, siem_sink=sink,
         alerting_in_use=bool(aiops_cfg.cluster_name or dr_cfg.stream))
+
+    def fresh_integrations() -> IntegrationRegistry:
+        # built from the CURRENT environment (which includes settings just applied from the console)
+        soar_now = SOARSettings()
+        aiops_now = AIOpsSettings()
+        identity_now = IdentitySettings()
+        sink_now = (SIEMSink(endpoint=soar_now.siem_endpoint, fmt=soar_now.siem_format,
+                             token_secret=soar_now.siem_token_secret, secrets=secrets, client=client,
+                             dead_letter_path=soar_now.dead_letter_path) if soar_now.siem_endpoint else None)
+        return build_integrations(
+            settings=Settings(), secrets=secrets, client=client, finops_cfg=FinOpsSettings(),
+            providers=build_providers(identity_now, secrets, client), identity_cfg=identity_now,
+            aiops_cfg=aiops_now, soar_cfg=soar_now, siem_sink=sink_now,
+            alerting_in_use=bool(aiops_now.cluster_name or DRSettings().stream))
+
+    def recheck(name: str) -> dict[str, Any] | None:
+        return next((r for r in integrations.status_of([name])), None)
+
+    settings_service = IntegrationSettingsService(
+        make_session_factory(engine), environment=settings.environment, secrets=secrets, recheck=recheck,
+        clock=gate.clock,
+        on_applied=lambda: integrations.replace_from(fresh_integrations()))
+    executors[ACTION_INTEGRATION_SETTINGS] = IntegrationSettingsExecutor(settings_service)
     verifier = OIDCVerifier(issuer=settings.oidc_issuer, audience=settings.oidc_audience,
                             jwks_url=settings.oidc_jwks_url, roles_claim=settings.oidc_roles_claim)
     logging.getLogger("oplia").info("control plane starting: env=%s dry_run=%s require_approval=%s",
@@ -211,6 +241,7 @@ def build(settings: Settings) -> FastAPI:
         db_registry=db_registry,
         consistency=consistency,
         integrations=integrations,
+        integration_settings=settings_service,
         network=network,
         kafka_connect=kafka_connect,
         object_replicator=object_replicator,
@@ -225,5 +256,9 @@ def build(settings: Settings) -> FastAPI:
 def __getattr__(name: str) -> FastAPI:
     # Lazy so importing this module (e.g. in tests or tooling) does not read env or open the DB.
     if name == "app":
-        return build(get_settings())
+        settings = get_settings()
+        if apply_persisted_overrides(settings.database_url):  # console-applied settings win over the environment
+            get_settings.cache_clear()
+            settings = get_settings()
+        return build(settings)
     raise AttributeError(name)

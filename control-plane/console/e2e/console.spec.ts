@@ -129,3 +129,39 @@ test("losing the API shows a banner and greys out the data; it clears when the A
   await expect(page.locator(".conn-banner")).toHaveCount(0);
   await expect(page.locator("main.content")).not.toHaveClass(/stale/);
 });
+
+test("an approver proposes an integration setting; another approves; an operator executes it", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await signIn(page, "alice");
+  await page.getByRole("link", { name: "Integrations" }).click();
+  await page.getByRole("button", { name: "Edit settings of github" }).click();
+  const dlg = page.getByRole("dialog");
+  // the API under test uses environment secrets: no secret fields, and the dialog says how to set them
+  await expect(dlg.getByLabel(/^Secret /)).toHaveCount(0);
+  await expect(dlg.getByText(/OPLIA_SECRET_<NAME>/)).toBeVisible();
+  await dlg.getByLabel(/OPLIA_CICD__GITHUB_REPOSITORY/).fill("acme/e2e-infra");
+  await dlg.getByLabel("Reason").fill("point remediation at the e2e repository");
+  await dlg.getByRole("button", { name: "Propose change" }).click();
+  await expect(dlg).toBeHidden();
+  await page.getByRole("link", { name: "open the proposal" }).click();
+  await expect(page.getByRole("heading", { name: "settings.integration" })).toBeVisible();
+  await expect(page.getByText(/acme\/e2e-infra/).first()).toBeVisible();
+  const url = page.url();
+  // the requester cannot approve their own change (four eyes)
+  await expect(page.getByRole("button", { name: "Approve" })).toBeDisabled();
+  await expect(page.getByText(/Four-eyes rule/)).toBeVisible();
+  await signOut(page);
+
+  await signIn(page, "carol");
+  await page.goto(url);
+  await page.getByRole("button", { name: "Approve" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Approve" }).click();
+  await expect(page.locator(".badge", { hasText: "APPROVED" }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Execute" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Execute" }).click();
+  // CI runs the API in its default dry-run mode: the plan is recorded, nothing is changed
+  await expect(page.locator(".badge", { hasText: /EXECUTED|DRY RUN/ }).first()).toBeVisible();
+  await expect(page.getByText(/OPLIA_CICD__GITHUB_REPOSITORY/).first()).toBeVisible();
+  expect(errors, errors.join("\n")).toEqual([]);
+});

@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 import oplia_ctl.aiops.models
 import oplia_ctl.dr.models
 import oplia_ctl.finops.models
-import oplia_ctl.identity.models  # noqa: F401
+import oplia_ctl.identity.models
+import oplia_ctl.integration_settings  # noqa: F401
 from oplia_ctl.db import Base, make_engine, make_session_factory
 from oplia_ctl.safety import SafetyGate
 
@@ -58,7 +59,7 @@ def session_factory(tmp_path, _pg_engine) -> Iterator[sessionmaker[Session]]:
                               "jit_access_requests, dr_breaker_state, dr_incidents, "
                               "db_health_checks, db_consistency_runs, network_dial_changes, "
                               "dr_object_manifest, dr_replication_runs, dr_image_jobs, dr_jobs, "
-                              "inventory_instances, inventory_scans, migration_hydration_docs "
+                              "inventory_instances, inventory_scans, migration_hydration_docs, integration_settings "
                               "RESTART IDENTITY"))
         yield make_session_factory(_pg_engine)
         return

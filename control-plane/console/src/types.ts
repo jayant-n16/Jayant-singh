@@ -248,6 +248,32 @@ export interface IntegrationStatus {
   latency_ms: number;
 }
 
+export interface SettingField {
+  key: string;
+  label: string;
+  kind: "text" | "url" | "list" | "bool" | "choice" | "json";
+  options: string[];
+  help: string;
+  value: unknown;
+  source: "applied" | "environment" | "default";
+}
+
+export interface IntegrationSettings {
+  name: string;
+  category: string;
+  note: string;
+  fields: SettingField[];
+  secrets: { name: string; present: boolean }[];
+}
+
+export interface SettingsCatalog {
+  integrations: IntegrationSettings[];
+  secrets_writable: boolean;
+  vault_note: string;
+  restart_required: boolean;
+  precedence: string;
+}
+
 export interface NetSection<T> { configured: boolean; ok: boolean; items: T[]; error: string | null; latency_ms: number }
 export interface EndpointGroup {
   key: string; arn: string; region?: string; traffic_dial?: number; health_check?: string; error?: string;
