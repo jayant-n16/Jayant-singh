@@ -304,6 +304,7 @@ def build_plan(change: SchemaChange, engine: str, info: TableInfo, ref_tables: d
 
         if engine == "oracle":
             change = oracle_upper(change)
+            ref_tables = {k.upper(): v for k, v in ref_tables.items()}
         return build_plan_x(change, engine, info, ref_tables, caps)
     def q(n: str) -> str:
         return _q(engine, n)
@@ -497,7 +498,9 @@ def build_plan(change: SchemaChange, engine: str, info: TableInfo, ref_tables: d
 
 def _eq(engine: str, a: str, b: str) -> str:
     if engine in ("sqlserver", "oracle"):
-        return f"({a} = {b} OR ({a} IS NULL AND {b} IS NULL))"
+        from oplia_ctl.migration.online_ddl_engines import null_eq
+
+        return null_eq(a, b)
     return f"{a} IS NOT DISTINCT FROM {b}" if engine == "postgres" else f"{a} <=> {b}"
 
 

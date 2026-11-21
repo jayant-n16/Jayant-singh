@@ -145,6 +145,17 @@ def test_keyset_without_row_constructors():
     assert sql == "(([a] > :4) OR ([a] = :5 AND [b] > :6))" and n == 3
 
 
+def test_null_safe_equality_never_unknown():
+    """Found by the SQL Server run: NOT (a = b OR (a IS NULL AND b IS NULL)) is UNKNOWN when only one side is
+    NULL, so the backfill skipped every not-yet-filled row and the zero-mismatch check counted none of them."""
+    from oplia_ctl.migration.online_ddl_engines import null_eq
+
+    assert null_eq("a", "b") == "(CASE WHEN a = b OR (a IS NULL AND b IS NULL) THEN 1 ELSE 0 END = 1)"
+    p = build_plan(_change({"op": "change_type", "column": "amount", "type": "bigint"}), "sqlserver", _ms_info(),
+                   {}, ONLINE)
+    assert "WHERE NOT ((CASE WHEN [amount__oplia_new] = (CAST([amount] AS BIGINT))" in p.checks[0].sql
+
+
 def test_retryable_errors_and_dsns():
     assert retryable_code("sqlserver", Exception(1222, b"Lock request time out period exceeded."))
     assert not retryable_code("sqlserver", Exception(2627, b"duplicate"))

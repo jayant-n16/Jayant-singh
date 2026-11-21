@@ -508,8 +508,10 @@ def build_plan_x(change: SchemaChange, engine: str, info: TableInfo, ref_tables:
 
 
 def null_eq(a: str, b: str) -> str:
-    """NULL-safe equality without IS NOT DISTINCT FROM (not in SQL Server before 2022 or in Oracle before 23ai)."""
-    return f"({a} = {b} OR ({a} IS NULL AND {b} IS NULL))"
+    """NULL-safe equality that is always TRUE or FALSE, never UNKNOWN, so ``NOT`` of it is safe too
+    (``a = b OR (a IS NULL AND b IS NULL)`` is UNKNOWN when exactly one side is NULL, and NOT UNKNOWN would
+    silently skip that row). IS NOT DISTINCT FROM is not in SQL Server before 2022 or in Oracle before 23ai."""
+    return f"(CASE WHEN {a} = {b} OR ({a} IS NULL AND {b} IS NULL) THEN 1 ELSE 0 END = 1)"
 
 
 def rename(engine: str, table: str, schema: str | None, tname: str, q: Callable[[str], str], old: str,
