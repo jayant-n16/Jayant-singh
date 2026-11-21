@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -264,7 +265,14 @@ class GremlinWriter(_NoFlush):
 
 # --------------------------------------------------------------------------- time-series
 class TimestreamWriter:
-    """Multi-measure records; ``spec`` per table: {time, dimensions, measures} (from FR-01)."""
+    """Multi-measure records; ``spec`` per table: {time, dimensions, measures, version?} (from FR-01).
+
+    Timestream rejects a second write of the same record (time + dimensions + measure name) unless it carries a
+    higher ``Version`` (Record.Version in the API: "Write requests for duplicate data with a higher version number
+    will update the existing measure value"; default 1). Without it every CDC *update* of a row that was already
+    written would be rejected. ``version`` names a monotonically increasing source column (e.g. an update
+    counter or commit timestamp in ms); without it the writer uses the wall clock in ms, which is correct for
+    in-order delivery but lets a redelivered older event overwrite a newer value."""
 
     def __init__(self, client: Any, database: str, spec: dict[str, dict[str, Any]], batch: int = 100) -> None:
         self.c, self.db, self.spec, self.batch = client, database, spec, batch
@@ -280,7 +288,8 @@ class TimestreamWriter:
                "MeasureName": collection, "MeasureValueType": "MULTI",
                "MeasureValues": [{"Name": m, "Value": str(doc[m]), "Type": "DOUBLE"} for m in sp["measures"]
                                  if doc.get(m) is not None],
-               "Time": str(int(ts.timestamp() * 1000)), "TimeUnit": "MILLISECONDS"}
+               "Time": str(int(ts.timestamp() * 1000)), "TimeUnit": "MILLISECONDS",
+               "Version": max(1, int(doc[sp["version"]]) if sp.get("version") else int(time.time() * 1000))}
         self._buf.setdefault(collection, []).append(rec)
         if len(self._buf[collection]) >= self.batch:
             self.flush()
@@ -431,10 +440,14 @@ class RedshiftMergeWriter:
             session = self._exec(f"CREATE TEMP TABLE {st} (LIKE {t})", None)
             self._exec(f"ALTER TABLE {st} ADD COLUMN _oplia_op CHAR(1)", session)
             for op, d in rows.values():
+                # Data API: a parameter cannot be NULL (it becomes the string 'NULL') or zero-length (the statement
+                # fails), so both are written as SQL literals instead of parameters
                 params = [{"name": f"c{j}", "value": str(_plain(d[c]))} for j, c in enumerate(cols)
-                          if d.get(c) is not None]
-                names = {f"c{j}" for j, c in enumerate(cols) if d.get(c) is not None}
-                vals = ", ".join(f":c{j}" if f"c{j}" in names else "NULL" for j in range(len(cols)))
+                          if d.get(c) is not None and str(_plain(d[c])) != ""]
+                names = {p["name"] for p in params}
+                empty = {f"c{j}" for j, c in enumerate(cols) if d.get(c) is not None and str(_plain(d[c])) == ""}
+                vals = ", ".join(f":c{j}" if f"c{j}" in names else ("''" if f"c{j}" in empty else "NULL")
+                                 for j in range(len(cols)))
                 self._exec(f"INSERT INTO {st} ({qc}, _oplia_op) VALUES ({vals}, '{op}')",  # nosec B608
                            session, params)
             on = " AND ".join(f'{t}."{_id(k)}" = s."{_id(k)}"' for k in pk)

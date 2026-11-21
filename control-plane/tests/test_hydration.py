@@ -256,10 +256,11 @@ def test_timestream_and_redshift_against_the_real_service_models():
                           "Dimensions": [{"Name": "device", "Value": "d1"}], "MeasureName": "readings",
                           "MeasureValueType": "MULTI", "MeasureValues": [{"Name": "temp", "Value": "21.5",
                                                                           "Type": "DOUBLE"}],
-                          "Time": "1767225600000", "TimeUnit": "MILLISECONDS"}]})
+                          "Time": "1767225600000", "TimeUnit": "MILLISECONDS", "Version": 7}]})
     stub.activate()
-    w = TimestreamWriter(ts, "metrics", {"readings": {"time": "at", "dimensions": ["device"], "measures": ["temp"]}})
-    w.upsert("readings", "1", {"id": 1, "device": "d1", "temp": 21.5, "at": "2026-01-01T00:00:00+00:00"})
+    w = TimestreamWriter(ts, "metrics", {"readings": {"time": "at", "dimensions": ["device"], "measures": ["temp"],
+                                                      "version": "rev"}})
+    w.upsert("readings", "1", {"id": 1, "device": "d1", "temp": 21.5, "at": "2026-01-01T00:00:00+00:00", "rev": 7})
     w.flush()
     stub.assert_no_pending_responses()
 
@@ -280,6 +281,29 @@ def test_timestream_and_redshift_against_the_real_service_models():
     st.activate()
     rw = RedshiftMergeWriter(rs, tgt, "dev", "public", {"orders": ["id"]}, sleep=lambda s: None)
     rw.upsert("orders", "1", {"id": 1, "total": "9.5"})
+    rw.flush()
+    st.assert_no_pending_responses()
+
+
+def test_redshift_data_api_null_and_empty_values_are_literals():
+    """Data API: a NULL parameter becomes the string 'NULL' and a zero-length one fails the statement."""
+    rs = boto3.client("redshift-data", region_name="eu-west-1")
+    st = Stubber(rs)
+    tgt = {"WorkgroupName": "oplia-wh"}
+    st.add_response("execute_statement", {"Id": "s1", "SessionId": "sess"}, {"Sql": ANY, "SessionKeepAliveSeconds": 300,
+                                                                            "Database": "dev", **tgt})
+    st.add_response("describe_statement", {"Id": "s1", "Status": "FINISHED"}, {"Id": "s1"})
+    st.add_response("execute_statement", {"Id": "s2"}, {"Sql": ANY, "SessionId": "sess"})
+    st.add_response("describe_statement", {"Id": "s2", "Status": "FINISHED"}, {"Id": "s2"})
+    st.add_response("execute_statement", {"Id": "s3"}, {
+        "Sql": 'INSERT INTO "orders__oplia_stage" ("id", "note", "total", _oplia_op) VALUES (:c0, \'\', NULL, \'u\')',
+        "SessionId": "sess", "Parameters": [{"name": "c0", "value": "1"}]})
+    st.add_response("describe_statement", {"Id": "s3", "Status": "FINISHED"}, {"Id": "s3"})
+    st.add_response("batch_execute_statement", {"Id": "b1"}, {"SessionId": "sess", "Sqls": ANY})
+    st.add_response("describe_statement", {"Id": "b1", "Status": "FINISHED"}, {"Id": "b1"})
+    st.activate()
+    rw = RedshiftMergeWriter(rs, tgt, "dev", "public", {"orders": ["id"]}, sleep=lambda s: None)
+    rw.upsert("orders", "1", {"id": 1, "note": "", "total": None})
     rw.flush()
     st.assert_no_pending_responses()
 
