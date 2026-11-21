@@ -38,7 +38,9 @@ from oplia_ctl.db import session_scope
 from oplia_ctl.secrets import SecretProvider
 from oplia_ctl.timeutil import iso_utc
 
-Engine = Literal["postgres", "mysql", "mongodb", "cockroachdb"]
+Engine = Literal["postgres", "mysql", "mongodb", "cockroachdb", "sqlserver", "oracle"]
+# engines the DR consistency check and resync support (a dr_of pair must use one of these)
+DR_ENGINES = ("postgres", "mysql", "mongodb", "cockroachdb")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
 
 
@@ -61,6 +63,9 @@ class DatabaseSpec(BaseModel):
             raise ValueError(f"{self.name}: invalid database name")
         if self.role == "primary" and self.dr_of:
             raise ValueError(f"{self.name}: a primary cannot have dr_of")
+        if self.dr_of and self.engine not in DR_ENGINES:
+            raise ValueError(f"{self.name}: DR consistency checks support {', '.join(DR_ENGINES)}, not {self.engine}; "
+                             "leave dr_of unset for this database")
         return self
 
     def public(self) -> dict[str, Any]:
@@ -127,9 +132,42 @@ def connect_mongo(uri: str) -> Any:
     return MongoClient(uri, serverSelectionTimeoutMS=10000, directConnection=True)
 
 
+def connect_sqlserver(dsn: str) -> Any:
+    """``sqlserver://user:password@host:port/database`` via pymssql (FreeTDS is bundled in the wheel).
+
+    Query options: ``tds_version`` (default 7.4) and ``encrypt`` (FreeTDS ``encryption``: off/request/require)."""
+    import pymssql
+
+    u = urlsplit(dsn)
+    if u.scheme != "sqlserver" or not u.hostname:
+        raise ValueError("SQL Server DSN must be sqlserver://user:password@host:port/database")
+    q = parse_qs(u.query)
+    kw: dict[str, Any] = {}
+    if "encrypt" in q:
+        kw["encryption"] = q["encrypt"][0]
+    return pymssql.connect(server=u.hostname, port=str(u.port or 1433), user=unquote(u.username or ""),
+                           password=unquote(u.password or ""), database=(u.path.lstrip("/") or "master"),
+                           login_timeout=10, timeout=120, autocommit=True,
+                           tds_version=q.get("tds_version", ["7.4"])[0], **kw)
+
+
+def connect_oracle(dsn: str) -> Any:
+    """``oracle://user:password@host:port/service_name`` via python-oracledb thin mode (no client libraries)."""
+    import oracledb
+
+    u = urlsplit(dsn)
+    if u.scheme != "oracle" or not u.hostname or not u.path.lstrip("/"):
+        raise ValueError("Oracle DSN must be oracle://user:password@host:port/service_name")
+    conn = oracledb.connect(user=unquote(u.username or ""), password=unquote(u.password or ""),
+                            dsn=f"{u.hostname}:{u.port or 1521}/{u.path.lstrip('/')}", tcp_connect_timeout=10)
+    conn.autocommit = True
+    return conn
+
+
 Connectors = dict[str, Callable[[str], Any]]
 DEFAULT_CONNECTORS: Connectors = {"postgres": connect_postgres, "cockroachdb": connect_postgres,
-                                  "mysql": connect_mysql, "mongodb": connect_mongo}
+                                  "mysql": connect_mysql, "mongodb": connect_mongo,
+                                  "sqlserver": connect_sqlserver, "oracle": connect_oracle}
 
 
 def _txt(v: Any) -> Any:
@@ -198,6 +236,46 @@ def _mysql_health(conn: Any) -> dict[str, Any]:
     return out
 
 
+def _mssql_health(conn: Any) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT @@VERSION, CAST(SERVERPROPERTY('Edition') AS nvarchar(128)), "
+                    "CAST(DATABASEPROPERTYEX(DB_NAME(), 'Updateability') AS nvarchar(32))")
+        version, edition, upd = cur.fetchone()
+        out: dict[str, Any] = {"version": str(version).splitlines()[0][:200], "edition": str(edition),
+                               "read_only": str(upd) == "READ_ONLY", "role": "primary", "replication": {}}
+        try:   # Always On availability groups: role of the local replica, when the database is in one
+            cur.execute("SELECT rs.role_desc, drs.synchronization_state_desc, drs.secondary_lag_seconds "
+                        "FROM sys.dm_hadr_database_replica_states drs JOIN sys.dm_hadr_availability_replica_states "
+                        "rs ON rs.replica_id = drs.replica_id WHERE drs.database_id = DB_ID() AND drs.is_local = 1")
+            row = cur.fetchone()
+            if row:
+                out["role"] = str(row[0]).lower()
+                out["replication"] = {"availability_group": True, "state": str(row[1]),
+                                      "lag_seconds": None if row[2] is None else float(row[2])}
+        except Exception as exc:   # needs VIEW SERVER STATE; report, do not fail the health check
+            out["replication"] = {"status_error": type(exc).__name__}
+    return out
+
+
+def _oracle_health(conn: Any) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        try:
+            cur.execute("SELECT banner FROM v$version")
+            version = str(cur.fetchone()[0])[:200]
+        except Exception:   # v$version not granted: PRODUCT_COMPONENT_VERSION is readable by every user
+            cur.execute("SELECT product || ' ' || version FROM product_component_version")
+            version = str(cur.fetchone()[0])[:200]
+        out: dict[str, Any] = {"version": version, "role": "unknown", "read_only": None, "replication": {}}
+        try:   # v$database needs SELECT_CATALOG_ROLE (or SELECT on v_$database); report, do not fail
+            cur.execute("SELECT database_role, open_mode FROM v$database")
+            role, mode = cur.fetchone()
+            out["role"] = str(role).lower()
+            out["read_only"] = "READ ONLY" in str(mode)
+        except Exception as exc:
+            out["replication"] = {"status_error": type(exc).__name__}
+    return out
+
+
 def _mongo_health(client: Any) -> dict[str, Any]:
     admin = client.admin
     version = str(admin.command("buildInfo").get("version"))
@@ -256,6 +334,10 @@ class DatabaseRegistry:
                     detail = _pg_health(conn, spec.engine)
                 elif spec.engine == "mysql":
                     detail = _mysql_health(conn)
+                elif spec.engine == "sqlserver":
+                    detail = _mssql_health(conn)
+                elif spec.engine == "oracle":
+                    detail = _oracle_health(conn)
                 else:
                     detail = _mongo_health(conn)
             finally:

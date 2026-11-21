@@ -17,7 +17,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16
@@ -111,6 +111,30 @@ jobs:
           for i in $(seq 1 60); do docker exec oplia-pg-logical pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
           docker exec oplia-pg-logical psql -U postgres -tc "SHOW wal_level"
           echo "OPLIA_TEST_PG_LOGICAL_URL=postgresql://postgres:postgres@localhost:55433/postgres" >> "$GITHUB_ENV"
+      - name: SQL Server 2022 (Developer edition) and Oracle Database Free 23 for the online-DDL tests
+        run: |
+          set -euo pipefail
+          pw="Op1$(openssl rand -hex 12)"
+          echo "::add-mask::$pw"
+          docker run -d --name oplia-mssql -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_PID=Developer \
+            -e "MSSQL_SA_PASSWORD=$pw" mcr.microsoft.com/mssql/server:2022-latest
+          docker run -d --name oplia-oracle -p 1521:1521 -e "ORACLE_PASSWORD=$pw" -e APP_USER=oplia \
+            -e "APP_USER_PASSWORD=$pw" gvenzl/oracle-free:23-slim-faststart
+          for i in $(seq 1 90); do
+            docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -Q "SELECT 1" \
+              >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -h -1 \
+            -Q "SET NOCOUNT ON; SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(64)) + ' ' + CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(32))"
+          docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -Q "CREATE DATABASE oplia_odl"
+          for i in $(seq 1 150); do
+            docker logs oplia-oracle 2>&1 | grep -q "DATABASE IS READY TO USE" && break
+            sleep 2
+          done
+          docker logs oplia-oracle 2>&1 | grep -E "DATABASE IS READY|Oracle Database" | tail -2
+          echo "OPLIA_TEST_MSSQL_URL=sqlserver://sa:$pw@localhost:1433/oplia_odl" >> "$GITHUB_ENV"
+          echo "OPLIA_TEST_ORACLE_URL=oracle://oplia:$pw@localhost:1521/FREEPDB1" >> "$GITHUB_ENV"
       - name: Shell scripts (shellcheck)
         run: shellcheck scripts/*.sh deploy/vault/scripts/*.sh
       - name: Lint

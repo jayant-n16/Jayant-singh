@@ -1,4 +1,5 @@
-"""FR-02 non-blocking online DDL for PostgreSQL and MySQL (expand / backfill / validate / contract).
+"""FR-02 non-blocking online DDL for PostgreSQL, MySQL, SQL Server and Oracle (expand / backfill / validate /
+contract). SQL Server and Oracle plans are in ``online_ddl_engines`` (their documented lock behaviour is there).
 
 A schema change is a declarative list of operations, never raw SQL. Every statement the engine runs
 is generated here from validated identifiers and SQLGlot-normalised types and expressions, and is
@@ -55,7 +56,8 @@ from oplia_ctl.replication.models import DrJobRow
 
 ACTION_SCHEMA_CHANGE = "migration.schema_change"
 ACTION_SCHEMA_CONTRACT = "migration.schema_contract"
-SUPPORTED_ENGINES = ("postgres", "mysql")
+SUPPORTED_ENGINES = ("postgres", "mysql", "sqlserver", "oracle")
+_DIALECTS = {"postgres": "postgres", "mysql": "mysql", "sqlserver": "tsql", "oracle": "oracle"}
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 NEW_SUFFIX = "__oplia_new"
 OLD_SUFFIX = "__oplia_old"
@@ -225,7 +227,7 @@ class TableInfo:
 
 
 def _dialect(engine: str) -> str:
-    return "postgres" if engine == "postgres" else "mysql"
+    return _DIALECTS[engine]
 
 
 def normalise_type(type_sql: str, engine: str) -> str:
@@ -255,13 +257,18 @@ def parse_expression(expr_sql: str, engine: str, allowed_columns: set[str]) -> e
         if node.find(bad):
             raise ValueError("subqueries are not allowed in expressions")
     for col in node.find_all(exp.Column):
-        if col.table or col.name not in allowed_columns:
+        name = col.name.upper() if engine == "oracle" else col.name
+        if col.table or name not in allowed_columns:
             raise ValueError(f"expression may only use these columns: {sorted(allowed_columns)}; got {col.sql()!r}")
     return node
 
 
 def _q(engine: str, name: str) -> str:
     ident(name)
+    if engine == "sqlserver":
+        return f"[{name}]"
+    if engine == "oracle":
+        return f'"{name.upper()}"'
     return f'"{name}"' if engine == "postgres" else f"`{name}`"
 
 
@@ -269,7 +276,7 @@ def _expr_sql(node: Any, engine: str, row_prefix: str | None = None) -> str:
     """Render with every column identifier quoted (case preserved); ``row_prefix`` gives NEW."col" in triggers."""
     def fix(x: exp.Expression) -> exp.Expression:
         if isinstance(x, exp.Column):
-            return exp.Column(this=exp.to_identifier(x.name, quoted=True),
+            return exp.Column(this=exp.to_identifier(x.name.upper() if engine == "oracle" else x.name, quoted=True),
                               table=exp.to_identifier(row_prefix) if row_prefix else None)
         return x
     return str(node.copy().transform(fix).sql(dialect=_dialect(engine)))
@@ -288,9 +295,16 @@ def _short(*parts: str) -> str:
     return hashlib.sha256("/".join(parts).encode()).hexdigest()[:10]
 
 
-def build_plan(change: SchemaChange, engine: str, info: TableInfo, ref_tables: dict[str, TableInfo]) -> Plan:
+def build_plan(change: SchemaChange, engine: str, info: TableInfo, ref_tables: dict[str, TableInfo],
+               caps: Any = None) -> Plan:
     if engine not in SUPPORTED_ENGINES:
         raise ValueError(f"online DDL supports {SUPPORTED_ENGINES}, not {engine}")
+    if engine in ("sqlserver", "oracle"):
+        from oplia_ctl.migration.online_ddl_engines import build_plan_x
+
+        if engine == "oracle":
+            change = oracle_upper(change)
+        return build_plan_x(change, engine, info, ref_tables, caps)
     def q(n: str) -> str:
         return _q(engine, n)
 
@@ -482,7 +496,26 @@ def build_plan(change: SchemaChange, engine: str, info: TableInfo, ref_tables: d
 
 
 def _eq(engine: str, a: str, b: str) -> str:
+    if engine in ("sqlserver", "oracle"):
+        return f"({a} = {b} OR ({a} IS NULL AND {b} IS NULL))"
     return f"{a} IS NOT DISTINCT FROM {b}" if engine == "postgres" else f"{a} <=> {b}"
+
+
+def oracle_upper(change: SchemaChange) -> SchemaChange:
+    """Oracle folds unquoted identifiers to upper case; the engine quotes every identifier, so it upper-cases
+    them first (``orders`` then addresses the table created as ``ORDERS``)."""
+    d = change.model_dump(mode="json")
+    for k in ("table", "schema_name"):
+        if d.get(k):
+            d[k] = d[k].upper()
+    for op in d["operations"]:
+        for k in ("column", "name", "ref_table", "new_name"):
+            if op.get(k):
+                op[k] = op[k].upper()
+        for k in ("columns", "ref_columns"):
+            if op.get(k):
+                op[k] = [c.upper() for c in op[k]]
+    return SchemaChange.model_validate(d)
 
 
 def _drop_col(engine: str, table: str, col: str) -> Stmt:
@@ -542,12 +575,30 @@ def _rows(conn: Any, engine: str, sql: str, params: Sequence[Any] = ()) -> list[
     args = tuple(params) if params else None       # no parameters: the SQL is sent as is (no % processing)
     if engine == "postgres":
         return list(conn.execute(sql, args).fetchall())
-    with conn.cursor() as cur:
-        cur.execute(sql, args)
+    if engine == "mysql":
+        with conn.cursor() as c:
+            c.execute(sql, args)
+            return list(c.fetchall())
+    cur = conn.cursor()
+    try:
+        if args is None:
+            cur.execute(sql)
+        else:
+            cur.execute(sql, list(args) if engine == "oracle" else args)
         return list(cur.fetchall())
+    finally:
+        cur.close()
 
 
 def table_info(conn: Any, engine: str, table: str, schema: str | None = None) -> TableInfo | None:
+    if engine == "sqlserver":
+        from oplia_ctl.migration.online_ddl_engines import mssql_table_info
+
+        return mssql_table_info(conn, table, schema)
+    if engine == "oracle":
+        from oplia_ctl.migration.online_ddl_engines import oracle_table_info
+
+        return oracle_table_info(conn, table.upper(), schema.upper() if schema else None)
     if engine == "postgres":
         rel = _rows(conn, engine, "SELECT to_regclass(format('%%I.%%I', %s::text, %s::text))::oid",
                     (schema or "public", table))[0][0]
@@ -605,6 +656,10 @@ class LockRetryExhaustedError(RuntimeError):
 
 
 def _retryable(engine: str, e: Exception) -> bool:
+    if engine in ("sqlserver", "oracle"):
+        from oplia_ctl.migration.online_ddl_engines import retryable_code
+
+        return retryable_code(engine, e)
     if engine == "postgres":
         return getattr(e, "sqlstate", None) in PG_RETRYABLE
     args: tuple[Any, ...] = tuple(getattr(e, "args", ()))
@@ -618,15 +673,26 @@ class Runner:
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.conn, self.engine, self.change, self._sleep = conn, engine, change, sleep
         self.attempts: list[dict[str, Any]] = []
+        secs = max(1, -(-change.lock_timeout_ms // 1000))
         if engine == "mysql":
-            secs = max(1, -(-change.lock_timeout_ms // 1000))
             self._mysql(f"SET SESSION lock_wait_timeout = {int(secs)}")
             self._mysql(f"SET SESSION innodb_lock_wait_timeout = {int(secs)}")
+        elif engine == "sqlserver":
+            self._mysql(f"SET LOCK_TIMEOUT {int(change.lock_timeout_ms)}")
+        elif engine == "oracle":
+            self._mysql(f"ALTER SESSION SET DDL_LOCK_TIMEOUT = {int(secs)}")
 
     def _mysql(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
-        with self.conn.cursor() as cur:
-            cur.execute(sql, tuple(params) if params else None)
+        """Run one statement on a DB-API cursor (MySQL, SQL Server, Oracle)."""
+        cur = self.conn.cursor()
+        try:
+            if params:
+                cur.execute(sql, list(params) if self.engine == "oracle" else tuple(params))
+            else:
+                cur.execute(sql)
             return list(cur.fetchall()) if cur.description else []
+        finally:
+            cur.close()
 
     def run(self, s: Stmt) -> None:
         for attempt in range(self.change.max_retries + 1):
@@ -695,6 +761,8 @@ class Runner:
         def q(n: str) -> str:
             return _q(self.engine, n)
 
+        if self.engine in ("sqlserver", "oracle"):
+            return self._backfill_batch_x(plan, b, last, q)
         pk = ", ".join(q(c) for c in b.pk)
         ph = ", ".join(["%s"] * len(b.pk))
         after = f" WHERE ({pk}) > ({ph})" if last is not None else ""
@@ -721,6 +789,55 @@ class Runner:
                 return hi, int(n or 0)
             except Exception as e:
                 if not _retryable(self.engine, e) or attempt == self.change.max_retries:
+                    raise
+                self._sleep(min(5.0, self.change.lock_timeout_ms / 1000 * (2 ** min(attempt, 6))))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _backfill_batch_x(self, plan: Plan, b: Backfill, last: list[Any] | None,
+                          q: Callable[[str], str]) -> tuple[list[Any] | None, int]:
+        """Keyset batch for SQL Server / Oracle (no row-value comparison, TOP / FETCH FIRST)."""
+        from oplia_ctl.migration.online_ddl_engines import keyset_after, keyset_params, keyset_upto
+
+        pk = ", ".join(q(c) for c in b.pk)
+        n = int(self.change.batch_size)
+        where, used = ("", 0)
+        if last is not None:
+            cond, used = keyset_after(self.engine, b.pk, q)
+            where = f" WHERE {cond}"
+        params = keyset_params(last) if last is not None else []
+        if self.engine == "sqlserver":
+            sel = f"SELECT TOP ({n}) {pk} FROM {plan.qualified}{where} ORDER BY {pk}"  # nosec B608
+        else:
+            sel = f"SELECT {pk} FROM {plan.qualified}{where} ORDER BY {pk} FETCH FIRST {n} ROWS ONLY"  # nosec B608
+        rows = _rows(self.conn, self.engine, sel, params)
+        if not rows:
+            return None, 0
+        hi = list(rows[-1])
+        conds, ps = [], []
+        if last is not None:
+            c1, k1 = keyset_after(self.engine, b.pk, q)
+            conds.append(c1)
+            ps.extend(keyset_params(last))
+        else:
+            k1 = 0
+        c2, _ = keyset_upto(self.engine, b.pk, q, start=1 + k1)
+        conds.append(c2)
+        ps.extend(keyset_params(hi))
+        e = b.expression if self.engine == "oracle" else _pct(b.expression)
+        sql = (f"UPDATE {plan.qualified} SET {q(b.column)} = {e} WHERE {' AND '.join(conds)} "  # nosec B608
+               f"AND NOT {_eq(self.engine, q(b.column), '(' + e + ')')}")
+        del used
+        for attempt in range(self.change.max_retries + 1):
+            try:
+                cur = self.conn.cursor()
+                try:
+                    cur.execute(sql, ps if self.engine == "oracle" else tuple(ps))
+                    cnt = cur.rowcount
+                finally:
+                    cur.close()
+                return hi, int(cnt or 0)
+            except Exception as ex:
+                if not _retryable(self.engine, ex) or attempt == self.change.max_retries:
                     raise
                 self._sleep(min(5.0, self.change.lock_timeout_ms / 1000 * (2 ** min(attempt, 6))))
         raise AssertionError("unreachable")  # pragma: no cover
@@ -834,7 +951,18 @@ class OnlineSchemaChange(_Base):
                     r = table_info(conn, spec.engine, op.ref_table, change.schema_name)
                     if r is not None:
                         refs[op.ref_table] = r
-            plan = build_plan(change, spec.engine, info, refs)
+            caps = None
+            if spec.engine == "sqlserver":
+                from oplia_ctl.migration.online_ddl_engines import mssql_caps
+
+                caps = mssql_caps(conn)
+            elif spec.engine == "oracle":
+                from oplia_ctl.migration.online_ddl_engines import oracle_caps
+
+                caps = oracle_caps(conn)
+            plan = build_plan(change, spec.engine, info, refs, caps)
+            if caps is not None:
+                st["server"] = caps.detail
             if spec.engine == "mysql" and any("CREATE TRIGGER" in x.sql for x in plan.expand):
                 mysql_trigger_precheck(conn)
         finally:
