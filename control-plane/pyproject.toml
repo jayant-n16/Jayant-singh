@@ -38,7 +38,7 @@ dr = ["sqlglot>=25", "pymongo>=4.6", "confluent-kafka>=2.4", "PyMySQL>=1.1",
 # Target SDKs for the CDC hydration sidecar (FR-04): installed only where the sidecar runs.
 targets = ["redis==8.1.0", "azure-cosmos==4.17.1", "google-cloud-firestore==2.34.1", "google-cloud-bigtable==2.50.2",
            "google-cloud-spanner==3.71.0", "google-cloud-bigquery==3.47.0", "gremlinpython==3.8.2",
-           "cassandra-driver==3.30.1"]
+           "cassandra-driver==3.30.1", "azure-data-tables==12.7.0", "google-cloud-discoveryengine==0.20.6"]
 dev = [
   "pytest>=8.0",
   "respx>=0.21",

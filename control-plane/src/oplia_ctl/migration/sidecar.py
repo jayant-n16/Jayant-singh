@@ -34,12 +34,16 @@ from oplia_ctl.migration.targets import (
     RedisWriter,
     RedshiftMergeWriter,
     SpannerWriter,
+    TableWriter,
     TargetWriter,
     TimestreamWriter,
+    TsqlWarehouseMergeWriter,
+    VertexSearchWriter,
 )
 
 KINDS = ("mongo", "cosmos", "firestore", "dynamodb", "bigtable", "cql", "spanner", "redis", "gremlin", "timestream",
-         "kusto", "bigquery", "redshift", "opensearch", "azure_search", "pgvector")
+         "kusto", "bigquery", "redshift", "opensearch", "azure_search", "pgvector", "table", "tsql_warehouse",
+         "vertex_search")
 
 
 def build_writer(t: dict[str, Any], secrets: Any, http: Any) -> TargetWriter:   # pragma: no cover - SDK wiring
@@ -122,6 +126,22 @@ def build_writer(t: dict[str, Any], secrets: Any, http: Any) -> TargetWriter:   
         import psycopg
 
         return PgVectorWriter(psycopg.connect(secrets.get(t["dsn_secret"]), autocommit=True), t["keys"])
+    if k == "table":
+        from azure.data.tables import TableServiceClient
+        from azure.identity import DefaultAzureCredential
+
+        svc = TableServiceClient(endpoint=t["endpoint"], credential=DefaultAzureCredential())
+        return TableWriter({n: svc.get_table_client(n) for n in t["tables"]}, t.get("partition_keys", {}),
+                           cosmos=".table.cosmos." in t["endpoint"])
+    if k == "tsql_warehouse":
+        import pyodbc  # Microsoft ODBC Driver 18 must be installed in the sidecar image
+
+        return TsqlWarehouseMergeWriter(lambda: pyodbc.connect(secrets.get(t["odbc_secret"]), autocommit=True),
+                                        t["schema"], t["keys"])
+    if k == "vertex_search":
+        from google.cloud import discoveryengine_v1 as de
+
+        return VertexSearchWriter(de.DocumentServiceClient(), t["data_stores"])
     raise ValueError(f"target kind must be one of {KINDS}")
 
 

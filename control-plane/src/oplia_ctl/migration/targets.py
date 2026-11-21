@@ -11,20 +11,22 @@ chain: IAM roles, managed identity, workload identity) and exposes ``upsert`` / 
 | distributed   | Spanner (+ Aurora DSQL, Cosmos PG via JDBC sink)       | ``SpannerWriter``             |
 | document      | DocumentDB, Cosmos DB (Mongo API), Cosmos NoSQL,       | ``MongoWriter``, ``CosmosWriter``, |
 |               | Firestore                                              | ``FirestoreWriter``           |
-| key-value     | DynamoDB, Cosmos Table*, Bigtable                      | ``DynamoWriter``, ``BigtableWriter`` |
+| key-value     | DynamoDB, Cosmos Table / Table Storage, Bigtable       | ``DynamoWriter``, ``TableWriter``, |
+|               |                                                        | ``BigtableWriter``            |
 | wide-column   | Keyspaces, Cosmos Cassandra, Bigtable                  | ``CqlWriter``, ``BigtableWriter`` |
 | cache         | ElastiCache, MemoryDB, Azure Redis, Memorystore        | ``RedisWriter``               |
 | graph         | Neptune, Cosmos Gremlin (+ Spanner Graph via Spanner)  | ``GremlinWriter``             |
 | time-series   | Timestream, Azure Data Explorer, Bigtable              | ``TimestreamWriter``, ``KustoWriter`` |
-| warehouse     | Redshift, BigQuery (Synapse/Fabric: see docs)          | ``RedshiftMergeWriter``,      |
-|               |                                                        | ``BigQueryMergeWriter``       |
-| vector        | OpenSearch, Azure AI Search, pgvector, Cosmos vector   | ``OpenSearchWriter``,         |
-|               |                                                        | ``AzureSearchWriter``,        |
-|               |                                                        | ``PgVectorWriter``, ``CosmosWriter`` |
+| warehouse     | Redshift, BigQuery, Synapse dedicated, Fabric Warehouse | ``RedshiftMergeWriter``,     |
+|               |                                                        | ``BigQueryMergeWriter``,      |
+|               |                                                        | ``TsqlWarehouseMergeWriter``  |
+| vector        | OpenSearch, Azure AI Search, pgvector, Cosmos vector,  | ``OpenSearchWriter``,         |
+|               | Vertex AI Search                                       | ``AzureSearchWriter``,        |
+|               |                                                        | ``PgVectorWriter``, ``CosmosWriter``, |
+|               |                                                        | ``VertexSearchWriter``        |
 
-* Cosmos Table API is written with ``CosmosWriter`` semantics only through the Table SDK, which is not
-  bundled; Synapse / Fabric Warehouse MERGE needs an ODBC driver and is documented, not shipped;
-  Vertex AI Search builds its own index from a data store (import), so no row writer is provided.
+Synapse dedicated SQL pool and Fabric Warehouse are reached through ODBC (pyodbc + Microsoft ODBC Driver 18),
+which the sidecar image must provide; the writer itself only needs a DB-API connection.
 """
 
 from __future__ import annotations
@@ -519,3 +521,180 @@ class PgVectorWriter(_NoFlush):
 
     def delete(self, collection: str, key: str, doc: dict[str, Any] | None = None) -> None:
         return None          # the row itself is deleted by the JDBC sink
+
+
+# --------------------------------------------------------------------------- key-value: Table API
+_TABLE_KEY_BAD = re.compile(r"[/\\#?\x00-\x1f\x7f-\x9f]")
+_TABLE_PROP = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,254}$")
+
+
+class TableWriter(_NoFlush):
+    """Azure Cosmos DB for Table / Azure Table Storage through ``azure-data-tables`` (one TableClient per table).
+
+    Entity rules from "Understanding the Table service data model": PartitionKey and RowKey are strings up to
+    1024 characters without ``/ \\ # ?`` or control characters; at most 252 custom properties; property names
+    are C#-identifier-like (no dash); an entity is at most 1 MiB. Azure Cosmos DB for Table is stricter (its
+    FAQ): RowKey at most 255 bytes, and the property names ID, rid, etag and ResourceId are reserved;
+    ``cosmos=True`` enforces those too. Keys that break the rules are refused (not rewritten) so two source keys
+    can never collapse into one entity."""
+
+    MAX_PROPS = 252
+    COSMOS_RESERVED = ("ID", "rid", "etag", "ResourceId")
+
+    def __init__(self, tables: dict[str, Any], partition_key: dict[str, str], cosmos: bool = False) -> None:
+        self.t, self.pk, self.cosmos = tables, partition_key, cosmos
+
+    def _key(self, v: Any, what: str) -> str:
+        s = str(v)
+        if not s or len(s) > 1024 or _TABLE_KEY_BAD.search(s):
+            raise ValueError(f"{what} {s[:80]!r} is not a valid Table key (1-1024 chars, no / \\ # ? or control)")
+        if self.cosmos and what == "RowKey" and len(s.encode()) > 255:
+            raise ValueError(f"RowKey {s[:80]!r} is longer than the 255 bytes Azure Cosmos DB for Table allows")
+        return s
+
+    def _keys(self, collection: str, key: str, doc: dict[str, Any] | None) -> tuple[str, str]:
+        field = self.pk.get(collection)
+        part = (doc or {}).get(field) if field else collection
+        if part is None:
+            raise ValueError(f"{collection}: partition key field {field!r} missing from the change")
+        return self._key(part, "PartitionKey"), self._key(key, "RowKey")
+
+    def upsert(self, collection: str, key: str, doc: dict[str, Any]) -> None:
+        from azure.data.tables import UpdateMode
+
+        pk, rk = self._keys(collection, key, doc)
+        props = {k: v for k, v in _plain(doc).items() if k not in ("PartitionKey", "RowKey")}
+        bad = [k for k in props if not _TABLE_PROP.fullmatch(k) or (self.cosmos and k in self.COSMOS_RESERVED)]
+        if bad:
+            raise ValueError(f"{collection}: property names not allowed by the Table API: {bad[:5]}")
+        if len(props) > self.MAX_PROPS:
+            raise ValueError(f"{collection}: {len(props)} properties, the Table API allows {self.MAX_PROPS}")
+        ent = {"PartitionKey": pk, "RowKey": rk,
+               **{k: (json.dumps(v) if isinstance(v, (dict, list)) else v) for k, v in props.items()}}
+        self.t[collection].upsert_entity(ent, mode=UpdateMode.REPLACE)
+
+    def delete(self, collection: str, key: str, doc: dict[str, Any] | None = None) -> None:
+        pk, rk = self._keys(collection, key, doc)
+        self.t[collection].delete_entity(partition_key=pk, row_key=rk)     # no error if it is already gone
+
+
+# --------------------------------------------------------------------------- warehouse: Synapse / Fabric
+class TsqlWarehouseMergeWriter:
+    """Azure Synapse dedicated SQL pool and Fabric Warehouse: per batch a session #temp staging table (columns
+    typed from the target's INFORMATION_SCHEMA), single-row parameterised INSERTs (a table value constructor
+    is not allowed as a MERGE source there) and one MERGE per table. The connection must be in autocommit
+    mode: Synapse does not allow DDL such as CREATE TABLE inside a user-defined transaction ("Use transactions
+    in a SQL pool"); each MERGE is atomic on its own.
+
+    Documented limits (MERGE Transact-SQL reference, Synapse / Fabric section): ``WHEN NOT MATCHED BY TARGET``
+    needs a HASH-distributed target on Synapse; MERGE ... INSERT is not supported on tables with IDENTITY
+    columns; on Synapse builds older than 10.0.17829.0 MERGE must not update a distribution key column."""
+
+    def __init__(self, connect: Callable[[], Any], schema: str, keys: dict[str, list[str]], batch: int = 1000,
+                 paramstyle: str = "qmark") -> None:
+        if paramstyle not in ("qmark", "format"):
+            raise ValueError("paramstyle: qmark (pyodbc) or format (pymssql)")
+        self._connect, self.schema, self.buf = connect, _id(schema), _MergeBuffer(keys, batch)
+        self._ph = "?" if paramstyle == "qmark" else "%s"
+
+    def upsert(self, collection: str, key: str, doc: dict[str, Any]) -> None:
+        if self.buf.add(collection, key, "u", doc):
+            self.flush()
+
+    def delete(self, collection: str, key: str, doc: dict[str, Any] | None = None) -> None:
+        if self.buf.add(collection, key, "d", doc or {}):
+            self.flush()
+
+    def _types(self, cur: Any, table: str) -> dict[str, str]:
+        from oplia_ctl.migration.online_ddl_engines import mssql_type
+
+        cur.execute("SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, "  # nosec B608 - placeholders only
+                    f"DATETIME_PRECISION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = {self._ph} "
+                    f"AND TABLE_NAME = {self._ph}", (self.schema, table))
+        out = {}
+        for name, typ, clen, prec, scale, dprec in cur.fetchall():
+            t = str(typ).lower()
+            ml = -1 if clen == -1 else (int(clen) * (2 if t in ("nvarchar", "nchar") else 1) if clen else 0)
+            sc = int(dprec) if t in ("datetime2", "time", "datetimeoffset") and dprec is not None else int(scale or 0)
+            out[str(name)] = mssql_type(t, ml, int(prec or 0), sc, None)
+        if not out:
+            raise ValueError(f"table {self.schema}.{table} not found")
+        return out
+
+    def flush(self) -> None:
+        batches = self.buf.drain()
+        if not batches:
+            return
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            for table, rows in batches.items():
+                pk = self.buf.keys[table]
+                types = self._types(cur, _id(table))
+                cols = sorted({c for _, d in rows.values() for c in d} | set(pk))
+                missing = [c for c in cols if c not in types]
+                if missing:
+                    raise ValueError(f"{table}: columns not in the target: {missing[:5]}")
+                t, st = f"[{self.schema}].[{_id(table)}]", f"[#{_id(table)}__oplia_stage]"
+                qc = ", ".join(f"[{_id(c)}]" for c in cols)
+                cur.execute(f"IF OBJECT_ID('tempdb..#{_id(table)}__oplia_stage') IS NOT NULL DROP TABLE {st}")
+                cur.execute(f"CREATE TABLE {st} (" + ", ".join(f"[{_id(c)}] {types[c]}" for c in cols)
+                            + ", [_oplia_op] char(1))")
+                ins = f"INSERT INTO {st} ({qc}, [_oplia_op]) VALUES ({', '.join([self._ph] * (len(cols) + 1))})"  # nosec B608
+                for op, d in rows.values():
+                    cur.execute(ins, (*[_plain(d.get(c)) if not isinstance(d.get(c), (dict, list))
+                                        else json.dumps(d.get(c)) for c in cols], op))
+                on = " AND ".join(f"T.[{_id(k)}] = S.[{_id(k)}]" for k in pk)
+                upd = ", ".join(f"T.[{_id(c)}] = S.[{_id(c)}]" for c in cols if c not in pk)
+                matched = f"WHEN MATCHED AND S.[_oplia_op] <> 'd' THEN UPDATE SET {upd} " if upd else ""  # nosec B608 - identifiers checked by _id()
+                cur.execute(f"MERGE INTO {t} AS T USING {st} AS S ON {on} "  # nosec B608
+                            "WHEN MATCHED AND S.[_oplia_op] = 'd' THEN DELETE " + matched
+                            + f"WHEN NOT MATCHED BY TARGET AND S.[_oplia_op] <> 'd' THEN INSERT ({qc}) VALUES ("
+                            + ", ".join(f"S.[{_id(c)}]" for c in cols) + ");")
+                cur.execute(f"DROP TABLE {st}")
+        finally:
+            conn.close()
+
+
+# --------------------------------------------------------------------------- vector: Vertex AI Search
+_RFC1034 = re.compile(r"^[A-Za-z]([A-Za-z0-9-]{0,126}[A-Za-z0-9])?$")
+
+
+class VertexSearchWriter(_NoFlush):
+    """Vertex AI Search (Discovery Engine) data store: ``UpdateDocument(allow_missing=True)`` upserts a
+    structured document, ``DeleteDocument`` removes it. Document ids must follow RFC-1034 with at most 128
+    characters (Document.id in the API); a source key that does not fit is mapped to ``k-<sha256>`` and the
+    original key is kept in ``struct_data._oplia_key``, so the mapping is deterministic and collision-free."""
+
+    def __init__(self, client: Any, data_stores: dict[str, str]) -> None:
+        for c, ds in data_stores.items():
+            if not re.fullmatch(r"projects/[^/]+/locations/[^/]+/collections/[^/]+/dataStores/[^/]+", ds):
+                raise ValueError(f"{c}: data store must be projects/*/locations/*/collections/*/dataStores/*")
+        self.c, self.ds = client, data_stores
+
+    @staticmethod
+    def doc_id(key: str) -> str:
+        import hashlib
+
+        return key if _RFC1034.fullmatch(key) else "k-" + hashlib.sha256(key.encode()).hexdigest()
+
+    def _name(self, collection: str, key: str) -> str:
+        return f"{self.ds[collection]}/branches/default_branch/documents/{self.doc_id(key)}"
+
+    def upsert(self, collection: str, key: str, doc: dict[str, Any]) -> None:
+        from google.cloud import discoveryengine_v1 as de
+        from google.protobuf import struct_pb2
+
+        data = struct_pb2.Struct()
+        data.update({**_plain(doc), "_oplia_key": key})
+        d = de.Document(name=self._name(collection, key), id=self.doc_id(key), struct_data=data)
+        self.c.update_document(request=de.UpdateDocumentRequest(document=d, allow_missing=True))
+
+    def delete(self, collection: str, key: str, doc: dict[str, Any] | None = None) -> None:
+        from google.api_core.exceptions import NotFound
+        from google.cloud import discoveryengine_v1 as de
+
+        try:
+            self.c.delete_document(request=de.DeleteDocumentRequest(name=self._name(collection, key)))
+        except NotFound:
+            return            # already gone: deletes are idempotent like every other writer

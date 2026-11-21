@@ -135,6 +135,15 @@ jobs:
           docker logs oplia-oracle 2>&1 | grep -E "DATABASE IS READY|Oracle Database" | tail -2
           echo "OPLIA_TEST_MSSQL_URL=sqlserver://sa:$pw@localhost:1433/oplia_odl" >> "$GITHUB_ENV"
           echo "OPLIA_TEST_ORACLE_URL=oracle://oplia:$pw@localhost:1521/FREEPDB1" >> "$GITHUB_ENV"
+      - name: Azurite (Azure Storage emulator, Table API) for the Table writer test
+        run: |
+          set -euo pipefail
+          docker run -d --name oplia-azurite -p 10002:10002 mcr.microsoft.com/azure-storage/azurite \
+            azurite-table --tableHost 0.0.0.0 --skipApiVersionCheck
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/10002) 2>/dev/null && break; sleep 1; done
+          # Azurite's documented, public development-account key (not a secret)
+          key="Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+          echo "OPLIA_TEST_AZURITE_TABLES=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$key;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;" >> "$GITHUB_ENV"
       - name: Shell scripts (shellcheck)
         run: shellcheck scripts/*.sh deploy/vault/scripts/*.sh
       - name: Lint
