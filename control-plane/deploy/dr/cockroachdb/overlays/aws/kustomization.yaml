@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - storageclass.yaml
+  - serviceexport.yaml
+configMapGenerator:
+  - name: cockroachdb-topology
+    namespace: oplia-data
+    literals:
+      - CLUSTER_ID=aws
+      - LOCALITY=cloud=aws,region=aws-us-east-1
+      # three nodes in each other cloud; each cluster resolves the others via Multi-Cluster Services
+      - JOIN=cockroachdb-0.aws.cockroachdb.oplia-data.svc.clusterset.local,cockroachdb-0.azure.cockroachdb.oplia-data.svc.clusterset.local,cockroachdb-0.gcp.cockroachdb.oplia-data.svc.clusterset.local,cockroachdb-0.ibm.cockroachdb.oplia-data.svc.clusterset.local,cockroachdb-1.aws.cockroachdb.oplia-data.svc.clusterset.local,cockroachdb-1.azure.cockroachdb.oplia-data.svc.clusterset.local
+patches:
+  - target:
+      kind: NetworkPolicy
+      name: cockroachdb
+    patch: |-
+      - op: add
+        path: /spec/ingress/0/from/-
+        value:
+          ipBlock:
+            cidr: 10.10.0.0/16   # cluster-mesh / interconnect range carrying the other clouds' node traffic

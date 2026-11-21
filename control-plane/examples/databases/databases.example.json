@@ -1,0 +1,14 @@
+[
+  {"name": "orders-pg", "engine": "postgres", "cloud": "aws", "role": "primary", "dsn_secret": "db-orders-pg-dsn",
+   "database": "orders", "description": "Orders primary (RDS PostgreSQL)"},
+  {"name": "orders-pg-dr-azure", "engine": "postgres", "cloud": "azure", "role": "dr", "dr_of": "orders-pg",
+   "dsn_secret": "db-orders-pg-dr-azure-dsn", "database": "orders", "description": "Logical replica in Azure"},
+  {"name": "catalog-mysql", "engine": "mysql", "cloud": "gcp", "role": "primary", "dsn_secret": "db-catalog-mysql-dsn",
+   "database": "catalog"},
+  {"name": "catalog-mysql-dr-aws", "engine": "mysql", "cloud": "aws", "role": "dr", "dr_of": "catalog-mysql",
+   "dsn_secret": "db-catalog-mysql-dr-aws-dsn", "database": "catalog"},
+  {"name": "sessions-mongo", "engine": "mongodb", "cloud": "azure", "role": "primary", "dsn_secret": "db-sessions-mongo-uri",
+   "database": "sessions"},
+  {"name": "ledger-crdb", "engine": "cockroachdb", "cloud": "gcp", "role": "primary", "dsn_secret": "db-ledger-crdb-dsn",
+   "database": "ledger"}
+]

@@ -1,0 +1,11 @@
+{
+  "name": "oplia-dr-mongodb-catalog",
+  "config": {
+    "connector.class": "io.debezium.connector.mongodb.MongoDbConnector",
+    "mongodb.connection.string": "${file:/opt/kafka/secrets/catalog-mongo.properties:uri}",
+    "topic.prefix": "cdc",
+    "collection.include.list": "catalog.products,catalog.prices",
+    "capture.mode": "change_streams_update_full",
+    "skipped.operations": "none"
+  }
+}

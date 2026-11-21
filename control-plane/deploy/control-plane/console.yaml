@@ -1,0 +1,144 @@
+# Web console: the only entry point from outside. It serves the single-page app and forwards
+# /api/ to the oplia-api Service (same origin). Settings come from ConfigMap oplia-console-config
+# (examples/console/console.env.example); the image validates them at start-up.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: oplia-console
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oplia-console
+  labels:
+    app.kubernetes.io/name: oplia-console
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oplia-console
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oplia-console
+    spec:
+      serviceAccountName: oplia-console
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: console
+          image: oplia-console:REPLACE_WITH_RELEASE   # pin by digest
+          envFrom:
+            - configMapRef:
+                name: oplia-console-config
+          env:
+            - name: OPLIA_CONSOLE_API_UPSTREAM
+              value: http://oplia-api.oplia-system.svc.cluster.local
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oplia-console
+spec:
+  selector:
+    app.kubernetes.io/name: oplia-console
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: oplia-console
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oplia-console
+---
+# TLS terminates at the ingress controller; set the host, class and certificate for your cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oplia
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["oplia.example.internal"]
+      secretName: oplia-tls
+  rules:
+    - host: oplia.example.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oplia-console
+                port:
+                  name: http
+---
+# The API accepts traffic only from the console pods and from namespaces that opt in with the
+# label oplia.io/api-client=true (for example the Alertmanager namespace, for its webhook).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: oplia-api-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: oplia-api
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: oplia-console
+        - namespaceSelector:
+            matchLabels:
+              oplia.io/api-client: "true"
+      ports:
+        - port: 8080
+          protocol: TCP

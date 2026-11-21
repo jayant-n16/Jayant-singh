@@ -1,0 +1,11 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: oplia-crdb-ssd
+provisioner: disk.csi.azure.com
+parameters:
+  skuName: Premium_ZRS
+  cachingMode: None
+reclaimPolicy: Retain          # never delete database volumes with the claim
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

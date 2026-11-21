@@ -1,0 +1,76 @@
+[
+  {
+    "id": "db-connection-pool-flush",
+    "description": "PostgreSQL: terminate the application's idle connections older than IDLE_SECONDS so pools reconnect. The DB user needs pg_signal_backend.",
+    "image": "docker.io/library/postgres@sha256:REPLACE_WITH_PINNED_DIGEST",
+    "command": [
+      "/bin/sh",
+      "-ec",
+      "psql --no-psqlrc -v ON_ERROR_STOP=1 -v db=\"$OPLIA_DATABASE\" -v app_user=\"$APP_DB_USER\" -v idle=\"$IDLE_SECONDS\" <<'SQL'\nSELECT count(pg_terminate_backend(pid)) AS terminated FROM pg_stat_activity WHERE datname = :'db' AND usename = :'app_user' AND state = 'idle' AND state_change < now() - make_interval(secs => :'idle'::int) AND pid <> pg_backend_pid();\nSQL"
+    ],
+    "allowed_namespaces": [
+      "shop"
+    ],
+    "env": {
+      "APP_DB_USER": "checkout_app",
+      "IDLE_SECONDS": "120",
+      "PGHOST": "orders-db.shop.svc.cluster.local",
+      "PGSSLMODE": "verify-full"
+    },
+    "secret_env": {
+      "PGUSER": {
+        "secret": "oplia-runbook-db",
+        "key": "username"
+      },
+      "PGPASSWORD": {
+        "secret": "oplia-runbook-db",
+        "key": "password"
+      }
+    },
+    "timeout_seconds": 120
+  },
+  {
+    "id": "memory-cache-clear",
+    "description": "Calls the application's own cache-clear admin endpoint through its Service (reaches ONE pod per call; the application must fan out if every replica must clear).",
+    "image": "docker.io/curlimages/curl@sha256:REPLACE_WITH_PINNED_DIGEST",
+    "command": [
+      "/bin/sh",
+      "-ec",
+      "curl --fail --silent --show-error --max-time 20 -X POST -H \"Authorization: Bearer $ADMIN_TOKEN\" \"http://$OPLIA_WORKLOAD_NAME.$OPLIA_NAMESPACE.svc.cluster.local:$ADMIN_PORT/admin/cache/clear\""
+    ],
+    "allowed_namespaces": [
+      "shop"
+    ],
+    "env": {
+      "ADMIN_PORT": "8081"
+    },
+    "secret_env": {
+      "ADMIN_TOKEN": {
+        "secret": "checkout-admin",
+        "key": "token"
+      }
+    },
+    "timeout_seconds": 60
+  },
+  {
+    "id": "iops-optimize",
+    "description": "AWS: move the workload's EBS volume to gp3 with higher IOPS/throughput (online change; AWS allows one modification per volume every 6 hours). Uses IRSA via the service account.",
+    "image": "docker.io/amazon/aws-cli@sha256:REPLACE_WITH_PINNED_DIGEST",
+    "command": [
+      "/bin/sh",
+      "-ec",
+      "aws ec2 modify-volume --volume-id \"$VOLUME_ID\" --volume-type gp3 --iops \"$TARGET_IOPS\" --throughput \"$TARGET_THROUGHPUT\""
+    ],
+    "allowed_namespaces": [
+      "shop"
+    ],
+    "service_account": "oplia-runbook-ebs",
+    "env": {
+      "VOLUME_ID": "vol-0123456789abcdef0",
+      "TARGET_IOPS": "6000",
+      "TARGET_THROUGHPUT": "250",
+      "AWS_REGION": "us-east-1"
+    },
+    "timeout_seconds": 120
+  }
+]

@@ -1,0 +1,13 @@
+[
+  {"role": "platform-admin", "description": "Entra security group granting cloud platform admin through RBAC",
+   "idp": "entra", "group_ref": "00000000-0000-0000-0000-0000000000a1", "max_minutes": 240,
+   "target_cloud_accounts": ["aws-prod-123456789012", "azure-prod-subscription"]},
+  {"role": "entra-global-reader", "description": "Entra directory role Global Reader (role definition id)",
+   "idp": "entra", "group_ref": "role:f2ef992c-3afb-46b9-b7cf-a126ee74c451", "max_minutes": 120,
+   "target_cloud_accounts": ["*"]},
+  {"role": "okta-finops-analyst", "description": "Okta group mapped to the FinOps analyst app role",
+   "idp": "okta", "group_ref": "00g000000000000000a1", "max_minutes": 480, "target_cloud_accounts": ["*"]},
+  {"role": "ad-server-admins", "description": "AD security group with local admin on production servers",
+   "idp": "ad", "group_ref": "CN=Prod Server Admins,OU=Privileged,OU=Groups,DC=corp,DC=example,DC=com",
+   "max_minutes": 120, "target_cloud_accounts": ["onprem-dc1"]}
+]
