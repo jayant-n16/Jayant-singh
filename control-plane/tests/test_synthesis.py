@@ -232,6 +232,14 @@ def test_document_cql_graph_timeseries_cache_and_vector_designs():
         synthesize(s, t, QUERIES)
 
 
+def test_cosmos_vector_dimensions_within_the_documented_limit():
+    s = _schema()
+    ok = synthesize(s, "cosmos_vector", embedding_dimensions=4096)
+    assert ok.documents["customers"]["vectorEmbeddingPolicy"]["vectorEmbeddings"][0]["dimensions"] == 4096
+    with pytest.raises(ValueError, match="at most 4096 dimensions"):
+        synthesize(s, "cosmos_vector", embedding_dimensions=4097)
+
+
 @pytest.mark.skipif(not PG_URL, reason="needs PostgreSQL (OPLIA_TEST_DATABASE_URL)")
 def test_introspect_postgres_with_routines():
     import psycopg

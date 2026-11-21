@@ -64,6 +64,10 @@ def check_prerequisites(conn: Any, engine: str) -> list[dict[str, Any]]:
             cur.execute("SELECT @@log_bin, @@binlog_format, @@binlog_row_image, @@gtid_mode")
             log_bin, fmt, image, gtid = cur.fetchone()
         add("binary log enabled", int(log_bin) == 1, log_bin, "enable binary logging (RDS: backup retention > 0)")
+        out.append({"check": "binlog retention (advisory)", "ok": True, "value": "not readable generically",
+                    "fix": "keep binlogs longer than any connector outage: RDS for MySQL defaults to NULL (not "
+                           "retained) - CALL mysql.rds_set_configuration('binlog retention hours', N), max 168; "
+                           "Aurora MySQL max 2160"})
         add("binlog_format=ROW", str(fmt).upper() == "ROW", fmt, "set binlog_format=ROW")
         add("binlog_row_image=FULL", str(image).upper() == "FULL", image, "set binlog_row_image=FULL")
         add("gtid_mode=ON (recommended)", str(gtid).upper() == "ON", gtid,

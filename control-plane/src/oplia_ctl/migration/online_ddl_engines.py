@@ -81,12 +81,36 @@ class Caps:
     detail: str
 
 
+def mssql_online(engine_edition: int, version: str, cdc_enabled: bool) -> tuple[bool, str]:
+    """Whether online index / ALTER TABLE operations are usable, and why not.
+
+    Microsoft, "Known issues and limitations with change data capture": "In Azure SQL Managed Instance and
+    versions of SQL Server before SQL Server 2025 (17.x), ALTER TABLE online DDL statements are unsupported
+    when change data capture is enabled on a database" (online index operations fail with error 18773).
+    Azure SQL Database (EngineEdition 5) is documented separately and is not covered by that statement."""
+    if engine_edition not in MSSQL_ONLINE_EDITIONS:
+        return False, ""
+    if cdc_enabled:
+        try:
+            major = int(str(version).split(".", 1)[0])
+        except ValueError:
+            major = 0
+        if engine_edition == 8 or (engine_edition == 3 and major < 17):
+            return False, ("change data capture is enabled on this database, and online ALTER TABLE / online "
+                           "index operations are unsupported with CDC on Azure SQL Managed Instance and SQL Server "
+                           "before 2025 (17.x)")
+    return True, ""
+
+
 def mssql_caps(conn: Any) -> Caps:
     with conn.cursor() as cur:
         cur.execute("SELECT CAST(SERVERPROPERTY('EngineEdition') AS int), CAST(SERVERPROPERTY('Edition') AS "
-                    "nvarchar(128)), CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))")
-        ee, edition, version = cur.fetchone()
-    return Caps(online=int(ee) in MSSQL_ONLINE_EDITIONS, detail=f"{edition} {version} (EngineEdition {ee})")
+                    "nvarchar(128)), CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128)), "
+                    "CAST(is_cdc_enabled AS int) FROM sys.databases WHERE database_id = DB_ID()")
+        ee, edition, version, cdc = cur.fetchone()
+    online, why = mssql_online(int(ee), str(version), bool(cdc))
+    detail = f"{edition} {version} (EngineEdition {ee})" + (f"; {why}" if why else "")
+    return Caps(online=online, detail=detail)
 
 
 def oracle_caps(conn: Any) -> Caps:

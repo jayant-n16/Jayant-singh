@@ -51,6 +51,7 @@ from oplia_ctl.migration.online_ddl import ident
 from oplia_ctl.replication.jobs import JobMachine
 
 UUID_NAMESPACE = uuid.UUID("6f3c8f0e-4a43-5b52-9c1e-0d6a3a1e2b7d")   # fixed: changing it changes every mapped key
+COSMOS_VECTOR_MAX_DIMENSIONS = 4096                      # Cosmos DB for NoSQL: diskANN / quantizedFlat
 
 Target = Literal[
     # 1. relational
@@ -1142,6 +1143,11 @@ def _vector_design(s: SourceSchema, target: str, d: Design, dims: int) -> None:
                                                  "hnswParameters": {"metric": "cosine"}}],
                                  "profiles": [{"name": "oplia-profile", "algorithm": "oplia-hnsw"}]}}
         elif target == "cosmos_vector":
+            # Cosmos DB "Index vector data": flat <= 505 dimensions, quantizedFlat and diskANN <= 4096.
+            if dims > COSMOS_VECTOR_MAX_DIMENSIONS:
+                raise ValueError(f"{tn}: Cosmos DB for NoSQL vector indexes support at most "
+                                 f"{COSMOS_VECTOR_MAX_DIMENSIONS} dimensions (diskANN / quantizedFlat); "
+                                 f"{dims} requested")
             d.documents[tn] = {"id": tn, "partitionKey": {"paths": ["/id"], "kind": "Hash", "version": 2},
                                "vectorEmbeddingPolicy": {"vectorEmbeddings": [
                                    {"path": "/embedding", "dataType": "float32", "distanceFunction": "cosine",

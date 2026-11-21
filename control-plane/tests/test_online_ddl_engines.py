@@ -20,7 +20,7 @@ from oplia_ctl.migration.online_ddl import (
     TableInfo,
     build_plan,
 )
-from oplia_ctl.migration.online_ddl_engines import Caps, keyset_after, keyset_params, retryable_code
+from oplia_ctl.migration.online_ddl_engines import Caps, keyset_after, keyset_params, mssql_online, retryable_code
 from oplia_ctl.secrets import StaticSecretProvider
 
 MSSQL_URL = os.environ.get("OPLIA_TEST_MSSQL_URL", "")      # sqlserver://sa:...@localhost:1433/master
@@ -49,6 +49,21 @@ def _change(*ops, **kw):
 
 
 # ----------------------------------------------------------------------------- planner
+@pytest.mark.parametrize("ee,version,cdc,online", [
+    (3, "16.0.4135.4", False, True),      # SQL Server 2022 Developer/Enterprise, no CDC
+    (3, "16.0.4135.4", True, False),      # 2022 + CDC: online ALTER TABLE unsupported
+    (3, "17.0.1000.7", True, True),       # 2025 lifts that restriction
+    (8, "12.0.2000.8", True, False),      # Managed Instance + CDC
+    (8, "12.0.2000.8", False, True),
+    (5, "12.0.2000.8", True, True),       # Azure SQL Database: not covered by the MI/SQL Server statement
+    (2, "16.0.4135.4", False, False),     # Standard edition: no online operations at all
+])
+def test_mssql_online_capability_with_cdc(ee, version, cdc, online):
+    ok, why = mssql_online(ee, version, cdc)
+    assert ok is online
+    assert ("change data capture" in why) == (cdc and not online and ee in (3, 8))
+
+
 def test_mssql_plan_is_online_or_refused():
     p = build_plan(_change(
         {"op": "add_column", "column": "flag", "type": "bit", "default": 0, "nullable": False},
