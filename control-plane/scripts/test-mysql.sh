@@ -9,7 +9,7 @@ if [ "$(id -u)" = "0" ]; then chown -R mysql:mysql "$D"; RUNAS=(--user=mysql); f
 mysqld --no-defaults "${RUNAS[@]}" --initialize-insecure --datadir="$D/data" >"$D/init.log" 2>&1 || { cat "$D/init.log" >&2; exit 1; }
 mysqld --no-defaults "${RUNAS[@]}" --datadir="$D/data" --port="$PORT" --bind-address=127.0.0.1 \
   --socket="$D/run/mysqld.sock" --pid-file="$D/run/mysqld.pid" --mysqlx=OFF --log-error="$D/error.log" \
-  --server-id=2 >/dev/null 2>&1 &
+  --server-id=2 --log-bin-trust-function-creators=1 >/dev/null 2>&1 &
 for _ in $(seq 1 100); do [ -S "$D/run/mysqld.sock" ] && break; sleep 0.2; done
 PW=$(openssl rand -hex 16)
 mysql --no-defaults -uroot --socket="$D/run/mysqld.sock" <<SQL

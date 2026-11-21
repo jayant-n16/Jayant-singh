@@ -53,8 +53,10 @@ class ReplicationSettings(BaseSettings):
 
 def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
                        audit: Callable[[str, dict[str, Any]], None] | None = None,
-                       secrets: Any = None) -> dict[str, JobMachine]:
-    """Every configured persisted-step DR module, keyed by ``kind``."""
+                       secrets: Any = None, halted: Callable[[], bool] | None = None) -> dict[str, JobMachine]:
+    """Every configured persisted-step DR and migration module, keyed by ``kind``.
+
+    ``halted`` is the safety gate's kill switch: while it returns True no worker advances any job."""
     machines: list[JobMachine] = []
     if cfg.drills is not None:
         machines.append(RestoreDrills(cfg.drills, session_factory, audit=audit))
@@ -72,7 +74,16 @@ def build_job_machines(cfg: ReplicationSettings, session_factory: Any,
         machines.append(FileShareReplicator(cfg.fileshares, session_factory, audit=audit))
     if cfg.queues is not None:
         machines.append(QueueRelay(cfg.queues, session_factory, audit=audit))
+    from oplia_ctl.migration.config import build_migration_machines
+
+    machines.extend(build_migration_machines(session_factory, secrets=secrets, audit=audit))
+    for m in machines:
+        m.halted = halted
     return {m.kind: m for m in machines}
+
+
+def gate_halted(gate: Any) -> Callable[[], bool]:
+    return lambda: bool(gate.kill_switch_engaged())
 
 
 def gate_audit(gate: Any, actor: str = "dr-worker") -> Callable[[str, dict[str, Any]], None]:
@@ -143,7 +154,9 @@ def job_worker_main() -> None:  # pragma: no cover - process wiring, exercised i
     from oplia_ctl.config import get_settings
     from oplia_ctl.secrets import build_secret_provider
     machines = build_job_machines(cfg, sf, audit=gate_audit(gate),
-                                  secrets=build_secret_provider(get_settings().secret_provider))
+                                  secrets=build_secret_provider(get_settings().secret_provider),
+                                  halted=gate_halted(gate))
     if not machines:
-        raise SystemExit("no DR job module configured (OPLIA_REPLICATION_DRILLS, ...)")
+        raise SystemExit("no DR or migration job module configured (OPLIA_REPLICATION_DRILLS, "
+                         "OPLIA_MIGRATION_ONLINE_DDL, ...)")
     print(json.dumps({kind: m.run_pending() for kind, m in machines.items()}, indent=2))

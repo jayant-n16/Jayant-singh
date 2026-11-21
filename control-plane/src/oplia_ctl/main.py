@@ -54,7 +54,13 @@ from oplia_ctl.integrations import build_integrations
 from oplia_ctl.lifecycle.manager import ACTION_IAC_DESTROY
 from oplia_ctl.network.service import NetworkService, NetworkSettings, TrafficDialExecutor
 from oplia_ctl.remediation.drift import ACTION_DRIFT_REMEDIATE, PipelineDispatchExecutor
-from oplia_ctl.replication.config import ACTION_PIPELINE, ReplicationSettings, build_job_machines, gate_audit
+from oplia_ctl.replication.config import (
+    ACTION_PIPELINE,
+    ReplicationSettings,
+    build_job_machines,
+    gate_audit,
+    gate_halted,
+)
 from oplia_ctl.replication.images import ACTION_IMAGE_REPLICATE, ImageReplicator
 from oplia_ctl.replication.objects import ACTION_OBJECT_DELETE, ACTION_OBJECT_SYNC, ObjectReplicator
 from oplia_ctl.replication.pipelines import KafkaConnect, PipelineExecutor
@@ -157,7 +163,8 @@ def build(settings: Settings) -> FastAPI:
         executors[ACTION_OBJECT_DELETE] = object_replicator.deletion_executor()
     if image_replicator is not None:
         executors[ACTION_IMAGE_REPLICATE] = image_replicator
-    dr_jobs = build_job_machines(rep_cfg, make_session_factory(engine), audit=gate_audit(gate), secrets=secrets)
+    dr_jobs = build_job_machines(rep_cfg, make_session_factory(engine), audit=gate_audit(gate), secrets=secrets,
+                                 halted=gate_halted(gate))
     for machine in dr_jobs.values():
         executors[machine.action] = machine
     integrations = build_integrations(

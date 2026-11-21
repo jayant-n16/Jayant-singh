@@ -90,6 +90,8 @@ ignore = ["S101"]  # assert is used in tests only
 "src/oplia_ctl/finops/config.py" = ["S105"]
 "src/oplia_ctl/identity/config.py" = ["S105"]
 "src/oplia_ctl/dr/*.py" = ["S105", "S608"]
+# SQL text is built only from validated identifiers and SQLGlot-rendered types/expressions; values are bound.
+"src/oplia_ctl/migration/*.py" = ["S608"]
 "src/oplia_ctl/identity/providers/*.py" = ["S105", "S107"]
 
 [tool.mypy]

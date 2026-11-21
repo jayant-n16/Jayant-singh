@@ -32,6 +32,9 @@ class JobMachine:
     title = "DR job"
     first_step = "START"
     secret_state_keys: tuple[str, ...] = ()
+    # Set by the wiring to the safety gate's kill switch: while it is engaged the worker advances no job
+    # (a job already queued must not keep changing infrastructure after the switch is thrown).
+    halted: Callable[[], bool] | None = None
 
     def fields(self) -> list[dict[str, Any]]:
         return []
@@ -92,6 +95,11 @@ class JobMachine:
                                                                   DrJobRow.status.in_(("QUEUED", "RUNNING"))))]
         out = []
         for jid in ids:
+            if self.halted is not None and self.halted():
+                r = self._load(jid)
+                out.append({"id": jid, "status": r.status, "step": r.step, "error": r.error,
+                            "halted": "kill switch engaged: not advanced"})
+                continue
             for _ in range(max_steps):
                 before = self._load(jid)
                 self.advance(jid)
