@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from oplia_ctl.replication.models import DrJobRow
+from oplia_ctl.timeutil import iso_utc
 
 TERMINAL = ("SUCCEEDED", "FAILED")
 
@@ -82,8 +83,8 @@ class JobMachine:
         st = {k: v for k, v in json.loads(r.state_json).items() if k not in self.secret_state_keys}
         return {"id": r.id, "kind": r.kind, "target": r.target, "status": r.status, "step": r.step,
                 "payload": json.loads(r.payload_json), "state": st, "error": r.error,
-                "requested_by": r.requested_by, "created_at": r.created_at.isoformat(),
-                "updated_at": r.updated_at.isoformat()}
+                "requested_by": r.requested_by, "created_at": iso_utc(r.created_at),
+                "updated_at": iso_utc(r.updated_at)}
 
     def get(self, jid: str) -> dict[str, Any]:
         return self._public(self._load(jid))

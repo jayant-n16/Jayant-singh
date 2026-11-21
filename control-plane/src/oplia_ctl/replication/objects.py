@@ -34,6 +34,7 @@ from oplia_ctl.replication.models import ObjectManifestRow, ReplicationRunRow
 from oplia_ctl.replication.stores import Store, StoreSpec
 from oplia_ctl.replication.streams import HashingReader
 from oplia_ctl.replication.tags import map_tags
+from oplia_ctl.timeutil import iso_utc
 
 ACTION_OBJECT_SYNC = "dr.object_sync"
 ACTION_OBJECT_DELETE = "dr.object_delete"
@@ -234,7 +235,7 @@ class ObjectReplicator:
                             "replicate_deletions": p.replicate_deletions,
                             "replicated_objects": n,
                             "last_run": None if last is None else {
-                                "status": last.status, "started_at": last.started_at.isoformat(),
+                                "status": last.status, "started_at": iso_utc(last.started_at),
                                 "copied": last.copied, "bytes": last.bytes,
                                 "summary": json.loads(last.summary_json)}})
         return out

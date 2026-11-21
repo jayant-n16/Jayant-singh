@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from oplia_ctl.http import ResilientClient
 from oplia_ctl.network.models import TrafficDialChangeRow
 from oplia_ctl.secrets import SecretProvider
+from oplia_ctl.timeutil import iso_utc
 
 GA_API_REGION = "us-west-2"   # the Global Accelerator API is served only from us-west-2
 LINKERD_GROUP, LINKERD_VERSION = "multicluster.linkerd.io", "v1alpha3"   # Link CRD storage version
@@ -204,7 +205,7 @@ class NetworkService:
             if group:
                 q = q.where(TrafficDialChangeRow.group_key == group)
             return [{"group": r.group_key, "from": r.from_percent, "to": r.to_percent,
-                     "executed_at": r.executed_at.isoformat(), "request_id": r.request_id}
+                     "executed_at": iso_utc(r.executed_at), "request_id": r.request_id}
                     for r in s.scalars(q)]
 
     # ---------------------------------------------------------------- policy

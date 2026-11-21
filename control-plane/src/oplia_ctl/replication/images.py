@@ -52,6 +52,7 @@ from oplia_ctl.replication.models import ImageJobRow
 from oplia_ctl.replication.streams import ChainReader, HashingReader, Readable, Zeros, write_disk_tar_gz
 from oplia_ctl.replication.tags import map_tags
 from oplia_ctl.replication.vhd import FOOTER_SIZE, VhdImage, build_footer, padded_size, parse_footer
+from oplia_ctl.timeutil import iso_utc
 
 ACTION_IMAGE_REPLICATE = "dr.image_replicate"
 _AMI = re.compile(r"^ami-[0-9a-f]{8,17}$")
@@ -251,7 +252,7 @@ class ImageReplicator:
             return [{"id": r.id, "source_cloud": r.source_cloud, "source_id": r.source_id,
                      "target_cloud": r.target_cloud, "name": r.name, "status": r.status, "step": r.step,
                      "state": {k: v for k, v in json.loads(r.state_json).items() if k != "sas"},
-                     "error": r.error, "created_at": r.created_at.isoformat(), "updated_at": r.updated_at.isoformat()}
+                     "error": r.error, "created_at": iso_utc(r.created_at), "updated_at": iso_utc(r.updated_at)}
                     for r in s.scalars(select(ImageJobRow).order_by(ImageJobRow.created_at.desc()).limit(limit))]
 
     # ----------------------------------------------------------------- worker

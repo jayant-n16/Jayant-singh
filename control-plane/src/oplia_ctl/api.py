@@ -118,6 +118,7 @@ from oplia_ctl.safety import (
 )
 from oplia_ctl.secrets import SecretNotFoundError, SecretProvider
 from oplia_ctl.soar.exporter import SOARExporter
+from oplia_ctl.timeutil import iso_utc
 
 MAX_WEBHOOK_BYTES = 256 * 1024
 
@@ -204,12 +205,12 @@ def _proposal_json(p: Proposal) -> dict[str, Any]:
         "reason": p.reason,
         "requested_by": p.requested_by,
         "status": p.status.value,
-        "created_at": p.created_at.isoformat(),
-        "expires_at": p.expires_at.isoformat(),
+        "created_at": iso_utc(p.created_at),
+        "expires_at": iso_utc(p.expires_at),
         "decided_by": p.decided_by,
-        "decided_at": p.decided_at.isoformat() if p.decided_at else None,
+        "decided_at": iso_utc(p.decided_at),
         "decision_note": p.decision_note,
-        "executed_at": p.executed_at.isoformat() if p.executed_at else None,
+        "executed_at": iso_utc(p.executed_at),
         "result": p.result,
     }
 

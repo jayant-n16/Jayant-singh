@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from oplia_ctl.databases.models import DbHealthCheckRow
 from oplia_ctl.db import session_scope
 from oplia_ctl.secrets import SecretProvider
+from oplia_ctl.timeutil import iso_utc
 
 Engine = Literal["postgres", "mysql", "mongodb", "cockroachdb"]
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
@@ -267,7 +268,7 @@ class DatabaseRegistry:
                                triggered_by=triggered_by)
         with session_scope(self._sf) as s:
             s.add(row)
-        return {"database": name, "checked_at": row.checked_at.isoformat(), "ok": error is None,
+        return {"database": name, "checked_at": iso_utc(row.checked_at), "ok": error is None,
                 "latency_ms": latency, "detail": detail, "error": error, "triggered_by": triggered_by}
 
     def check_all(self, *, triggered_by: str) -> list[dict[str, Any]]:
