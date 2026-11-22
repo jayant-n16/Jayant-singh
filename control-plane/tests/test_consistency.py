@@ -94,6 +94,27 @@ def test_pg_schema_drift_is_reported_and_never_copied(gate, session_factory, pg_
     assert done.status is ProposalStatus.FAILED and "migration first" in done.result["error"]
 
 
+def test_pg_schema_difference_does_not_hide_changed_data(gate, session_factory, pg_pair):
+    # the user's case: the expand step added a column on the source only, then a row changed on the source
+    conns, secrets = pg_pair
+    conns["cc_src"].execute("ALTER TABLE orders ADD COLUMN amount__oplia_new numeric(14,2)")
+    conns["cc_src"].execute("UPDATE orders SET amount = 999 WHERE id = 1")
+    _reg, checker = _checker(gate, session_factory, _specs("postgres", "cc_src", "cc_dr"), secrets)
+    r = checker.run("dr", triggered_by="alice")
+    assert r["status"] == "DRIFT"
+    assert [(s["table"], s["issue"]) for s in r["report"]["schema"]] == [("public.orders", "columns differ")]
+    orders = r["report"]["tables"]["public.orders"]
+    assert orders["checksum"] == "differ" and orders["match"] is False
+    assert orders["compared_columns"] == ["id", "amount", "note", "at"]
+    assert "1 table(s) with different data: public.orders" in r["summary"]
+    assert gate.get(r["proposal_id"]).payload["tables"] == ["public.orders"]
+    # the same extra column with identical data: schema drift only, the data matches
+    conns["cc_src"].execute("UPDATE orders SET amount = 1.5 WHERE id = 1")
+    r = checker.run("dr", triggered_by="alice")
+    assert r["report"]["tables"]["public.orders"]["checksum"] == "match"
+    assert r["status"] == "DRIFT" and "different data" not in r["summary"]
+
+
 def test_pg_resync_refuses_a_locked_target(gate, session_factory, pg_pair):
     conns, secrets = pg_pair
     conns["cc_dr"].execute("DELETE FROM orders WHERE id = 1")

@@ -120,6 +120,11 @@ def sql_catalog(conn: Any, engine: str, database: str | None) -> dict[str, Table
     return out
 
 
+def _restrict(info: TableInfo, columns: list[tuple[str, str, str]]) -> TableInfo:
+    """The same table limited to ``columns`` (in this side's order); the primary key is kept as is."""
+    return TableInfo(info.schema, info.table, [c for c in info.columns if c in columns], list(info.pk))
+
+
 def _qualified(engine: str, info: TableInfo) -> str:
     return f"{_q(engine, info.schema)}.{_q(engine, info.table)}"
 
@@ -237,24 +242,34 @@ class ConsistencyChecker:
                 if t not in scat:
                     schema.append({"table": t, "issue": "only on DR target"})
                     continue
-                if same_engine and scat[t].columns != dcat[t].columns:
+                s_info, d_info = scat[t], dcat[t]
+                compared_on: list[str] | None = None
+                if same_engine and s_info.columns != d_info.columns:
                     schema.append({"table": t, "issue": "columns differ",
-                                   "source": scat[t].columns, "target": dcat[t].columns})
-                    continue
-                if not same_engine and [c[0] for c in scat[t].columns] != [c[0] for c in dcat[t].columns]:
+                                   "source": s_info.columns, "target": d_info.columns})
+                    # Data is still compared over the columns both sides have with the same name, type
+                    # and nullability, so a schema difference never hides a data difference.
+                    common = [c for c in s_info.columns if c in d_info.columns]
+                    s_info, d_info = _restrict(s_info, common), _restrict(d_info, common)
+                    compared_on = [c[0] for c in common]
+                if not same_engine and [c[0] for c in s_info.columns] != [c[0] for c in d_info.columns]:
                     schema.append({"table": t, "issue": "column names differ"})
-                    continue
-                sc, dc = sql_count(sconn, src.engine, scat[t]), sql_count(dconn, dst.engine, dcat[t])
+                sc, dc = sql_count(sconn, src.engine, s_info), sql_count(dconn, dst.engine, d_info)
                 entry: dict[str, Any] = {"source_rows": sc, "target_rows": dc, "match": sc == dc}
-                if not same_engine:
+                if compared_on is not None:
+                    entry["compared_columns"] = compared_on
+                if compared_on is not None and (not compared_on or not set(s_info.pk) <= set(compared_on)
+                                                or not s_info.pk or s_info.pk != d_info.pk):
+                    entry["checksum"] = "skipped: primary key differs or is not in the common columns (counts only)"
+                elif not same_engine:
                     entry["checksum"] = "skipped: different engines (counts only)"
-                elif not scat[t].pk:
+                elif not s_info.pk:
                     entry["checksum"] = "skipped: no primary key (counts only)"
                 elif max(sc, dc) > cfg.checksum_max_rows:
                     entry["checksum"] = f"skipped: more than {cfg.checksum_max_rows} rows (counts only)"
                 elif sc == dc:
-                    s_sum, _ = table_checksum(iter_sql_rows(sconn, src.engine, scat[t], cfg.checksum_chunk_rows))
-                    d_sum, _ = table_checksum(iter_sql_rows(dconn, dst.engine, dcat[t], cfg.checksum_chunk_rows))
+                    s_sum, _ = table_checksum(iter_sql_rows(sconn, src.engine, s_info, cfg.checksum_chunk_rows))
+                    d_sum, _ = table_checksum(iter_sql_rows(dconn, dst.engine, d_info, cfg.checksum_chunk_rows))
                     entry["checksum"] = "match" if s_sum == d_sum else "differ"
                     entry["match"] = s_sum == d_sum
                 tables[t] = entry
