@@ -183,8 +183,8 @@ def test_retryable_errors_and_dsns():
         connect_sqlserver("mssql://h/db")
     with pytest.raises(ValueError, match="oracle://"):
         connect_oracle("oracle://u:p@h:1521")
-    with pytest.raises(ValueError, match="DR consistency checks support"):
-        DatabaseSpec(name="x", engine="oracle", cloud="aws", role="dr", dsn_secret="d", dr_of="y")
+    # SQL Server and Oracle DR copies are accepted (consistency checks, no automatic resync)
+    assert DatabaseSpec(name="x", engine="oracle", cloud="aws", role="dr", dsn_secret="d", dr_of="y").dr_of == "y"
 
 
 # ----------------------------------------------------------------------------- real servers
