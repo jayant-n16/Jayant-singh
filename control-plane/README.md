@@ -53,14 +53,21 @@ PostgreSQL 16 and MySQL 8 servers in CI; MongoDB and CockroachDB with fakes of t
 
 ## DR consistency checks
 
+**Production setup, step by step, for all six engines: [docs/dr-production-setup.md](docs/dr-production-setup.md)**
+(OPLIA does not replicate databases; it registers, checks, and gates repair and traffic moves).
+
 For every DR copy (`dr_of`), `oplia-db-consistency` (CronJob, hourly) and `POST /databases/{name}/consistency`
 compare source and copy read-only: schema (tables, columns, types, nullability; MongoDB collections and
 indexes), row/document counts, **chunked checksums** (keyset pagination by primary key; same-engine pairs;
 tables without a primary key or above `OPLIA_CONSISTENCY_CHECKSUM_MAX_ROWS` are compared by count only, and
-the report says so) and replication lag. A table that differs is re-checked once after
+the report says so) and replication lag. A table whose columns differ is still compared on the columns both
+sides share (`compared_columns` in the report), so a schema difference never hides changed data. SQL Server
+and Oracle pairs are checked the same way (lag: `secondary_lag_seconds` read on the SQL Server primary;
+Data Guard `apply lag` from `V$DATAGUARD_STATS` on the Oracle standby) but have **no automatic resync**: drift
+is reported without a proposal. A table that differs is re-checked once after
 `OPLIA_CONSISTENCY_RECHECK_DELAY_SECONDS` (the source keeps changing). If the DR breaker is OPEN the report
-says differences are expected and no proposal is raised. Otherwise data/schema drift raises a `dr.resync`
-proposal for same-engine pairs (PostgreSQL, MySQL, CockroachDB, MongoDB; PostgreSQL<->CockroachDB is
+says differences are expected and no proposal is raised. Otherwise data/schema drift raises one `dr.resync`
+proposal (repeated checks of the same drift reuse it while it is pending or approved) for same-engine pairs (PostgreSQL, MySQL, CockroachDB, MongoDB; PostgreSQL<->CockroachDB is
 refused): it refuses a read-only (locked) target and any schema difference, pauses replication into the
 copy (PostgreSQL subscriptions, MySQL SQL thread, CockroachDB `LOGICAL REPLICATION` jobs, and any Kafka Connect
 sink connectors listed in the target's `pause_connectors`), replaces each drifted table in one transaction
@@ -468,7 +475,8 @@ RAC online DDL (CI runs SQL Server 2022 Developer and Oracle Database Free 23); 
 
 Databases engines `sqlserver` (`sqlserver://user:password@host:port/database`, pymssql) and `oracle`
 (`oracle://user:password@host:port/service_name`, python-oracledb thin) are accepted in `OPLIA_DATABASES` for
-health checks and online DDL; `dr_of` (DR consistency) is refused for them. The quotas and limits of 26 target
+health checks, online DDL and DR consistency checks (check only, no automatic resync; tested against SQL
+Server 2022 and Oracle Database Free 23 in CI). The quotas and limits of 26 target
 services, read from their official pages, are in docs/migration-engine.md ("Quotas and limits").
 
 ## API
