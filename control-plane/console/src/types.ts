@@ -214,6 +214,7 @@ export interface ConsistencyTable {
   match: boolean;
   checksum?: string;
   rechecked?: boolean;
+  compared_columns?: string[];
 }
 
 export interface ConsistencyRun {
@@ -229,6 +230,8 @@ export interface ConsistencyRun {
     lag_seconds?: number | null;
     dr_breaker?: { stream: string; state: string; incident_id: string | null };
     error?: string;
+    resync_supported?: boolean;
+    resync_proposal_reused?: boolean;
   };
   triggered_by: string;
   proposal_id: string | null;

@@ -38,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from oplia_ctl.databases.models import ConsistencyRunRow
-from oplia_ctl.databases.registry import DatabaseRegistry, DatabaseSpec, _scrub, _txt
+from oplia_ctl.databases.registry import RESYNC_ENGINES, DatabaseRegistry, DatabaseSpec, _scrub, _txt
 from oplia_ctl.db import session_scope
 from oplia_ctl.safety import ProposalStatus, SafetyGate
 
@@ -66,21 +66,74 @@ class TableInfo:
 def _q(engine: str, ident: str) -> str:
     if not _SAFE.fullmatch(ident):
         raise ValueError(f"unsupported identifier {ident!r}")
-    return f"`{ident}`" if engine == "mysql" else f'"{ident}"'
-
-
-# ------------------------------------------------------------------ SQL catalog (PG, CRDB, MySQL)
-def _sql_rows(conn: Any, engine: str, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
     if engine == "mysql":
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return [tuple(_txt(v) for v in r) for r in cur.fetchall()]
+        return f"`{ident}`"
+    if engine == "sqlserver":
+        return f"[{ident}]"
+    return f'"{ident}"'
+
+
+# ------------------------------------------------------------------ SQL catalog (PG, CRDB, MySQL, SQL Server, Oracle)
+_CURSOR_ENGINES = ("mysql", "sqlserver", "oracle")   # DB-API cursor drivers (psycopg connections execute directly)
+
+
+def _ph(engine: str, n: int) -> str:
+    """The n-th (1-based) bind placeholder of the engine's driver."""
+    return f":{n}" if engine == "oracle" else "%s"
+
+
+def _value(v: Any) -> Any:
+    if hasattr(v, "read") and callable(v.read):   # Oracle LOB locators: compare the content, not the locator
+        v = v.read()
+    return _txt(v)
+
+
+def _sql_rows(conn: Any, engine: str, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+    if engine in _CURSOR_ENGINES:
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, params) if params else cur.execute(sql)
+            return [tuple(_value(v) for v in r) for r in cur.fetchall()]
+        finally:
+            cur.close()
     return [tuple(_txt(v) for v in r) for r in conn.execute(sql, params).fetchall()]
 
 
+def _oracle_catalog(conn: Any, owner: str | None) -> dict[str, TableInfo]:
+    if not owner:
+        owner = str(_sql_rows(conn, "oracle", "SELECT USER FROM dual")[0][0])
+    owner = owner.upper()
+    # tables only (no views), not in the recycle bin, not temporary; bound owner, constant SQL text
+    cols = _sql_rows(conn, "oracle",
+                     "SELECT c.table_name, c.column_name, c.data_type, c.nullable FROM all_tab_columns c "
+                     "JOIN all_tables t ON t.owner = c.owner AND t.table_name = c.table_name "
+                     "WHERE c.owner = :1 AND t.dropped = 'NO' AND t.temporary = 'N' "
+                     "ORDER BY c.table_name, c.column_id", (owner,))
+    pks = _sql_rows(conn, "oracle",
+                    "SELECT k.table_name, k.column_name FROM all_constraints c JOIN all_cons_columns k "
+                    "ON k.owner = c.owner AND k.constraint_name = c.constraint_name "
+                    "WHERE c.owner = :1 AND c.constraint_type = 'P' ORDER BY k.table_name, k.position", (owner,))
+    out: dict[str, TableInfo] = {}
+    for table, col, dtype, nullable in cols:
+        out.setdefault(str(table), TableInfo(owner, str(table), [], [])).columns.append(
+            (str(col), str(dtype).lower(), "YES" if str(nullable) == "Y" else "NO"))
+    for table, col in pks:
+        if str(table) in out and str(col) not in out[str(table)].pk:
+            out[str(table)].pk.append(str(col))
+    return out
+
+
 def sql_catalog(conn: Any, engine: str, database: str | None) -> dict[str, TableInfo]:
+    """Tables, columns and primary keys. Keys compare the two sides: by table name where the schema
+    name may legitimately differ (MySQL database, Oracle owner), by schema.table otherwise."""
+    if engine == "oracle":
+        return _oracle_catalog(conn, database)
     args: tuple[Any, ...]
-    if engine == "mysql":
+    if engine == "sqlserver":
+        # the DSN selects the database; system schemas are excluded
+        schema_filter = "c.table_schema NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')"
+        args = ()
+    elif engine == "mysql":
         schema_filter, args = "c.table_schema = %s", (database,)
         if not database:
             raise ValueError("MySQL consistency checks need 'database' (the schema) on both sides")
@@ -134,20 +187,53 @@ def sql_count(conn: Any, engine: str, info: TableInfo) -> int:
     return int(_sql_rows(conn, engine, sql)[0][0])
 
 
+def _limit(engine: str, sql_body: str, order: str, n: int) -> str:
+    if engine == "sqlserver":
+        return f"{sql_body} ORDER BY {order} OFFSET 0 ROWS FETCH NEXT {int(n)} ROWS ONLY"
+    if engine == "oracle":
+        return f"{sql_body} ORDER BY {order} FETCH FIRST {int(n)} ROWS ONLY"
+    return f"{sql_body} ORDER BY {order} LIMIT {int(n)}"
+
+
+def _after(engine: str, pk: list[str]) -> str:
+    """Keyset predicate "row key > last key". Row-value comparison where the engine has it; SQL Server
+    and Oracle get the equivalent expanded form (a > ?) OR (a = ? AND b > ?) ..."""
+    if engine not in ("sqlserver", "oracle"):
+        return f"({', '.join(_q(engine, c) for c in pk)}) > ({', '.join(['%s'] * len(pk))})"
+    terms, n = [], 0
+    for i in range(len(pk)):
+        parts = []
+        for j in range(i):
+            n += 1
+            parts.append(f"{_q(engine, pk[j])} = {_ph(engine, n)}")
+        n += 1
+        parts.append(f"{_q(engine, pk[i])} > {_ph(engine, n)}")
+        terms.append("(" + " AND ".join(parts) + ")")
+    return "(" + " OR ".join(terms) + ")"
+
+
+def _after_params(engine: str, last: tuple[Any, ...]) -> tuple[Any, ...]:
+    if engine not in ("sqlserver", "oracle"):
+        return last
+    out: list[Any] = []
+    for i in range(len(last)):
+        out.extend(last[: i + 1])
+    return tuple(out)
+
+
 def iter_sql_rows(conn: Any, engine: str, info: TableInfo, chunk: int) -> Iterator[tuple[Any, ...]]:
     """All rows ordered by primary key, fetched ``chunk`` at a time with keyset pagination."""
     cols = ", ".join(_q(engine, c[0]) for c in info.columns)
     pk = ", ".join(_q(engine, c) for c in info.pk)
     pk_idx = [[c[0] for c in info.columns].index(k) for k in info.pk]
-    ph = "%s"
     base = f"SELECT {cols} FROM {_qualified(engine, info)}"  # noqa: S608 # nosec B608 - identifiers validated by _q
     last: tuple[Any, ...] | None = None
     while True:
         if last is None:
-            rows = _sql_rows(conn, engine, f"{base} ORDER BY {pk} LIMIT {int(chunk)}")
+            rows = _sql_rows(conn, engine, _limit(engine, base, pk, chunk))
         else:
-            cond = f"({pk}) > ({', '.join([ph] * len(info.pk))})"
-            rows = _sql_rows(conn, engine, f"{base} WHERE {cond} ORDER BY {pk} LIMIT {int(chunk)}", last)
+            rows = _sql_rows(conn, engine, _limit(engine, f"{base} WHERE {_after(engine, info.pk)}", pk, chunk),
+                             _after_params(engine, last))
         yield from rows
         if len(rows) < chunk:
             return
@@ -343,6 +429,9 @@ class ConsistencyChecker:
             report["target_health"] = {"ok": health["ok"], "error": health["error"],
                                        "replication": health["detail"].get("replication")}
             lag = _max_lag(health["detail"].get("replication"))
+            if src.engine == "sqlserver" and lag is None:
+                # Always On: secondary_lag_seconds is documented from the primary's side
+                lag = self._sqlserver_lag_from_primary(src)
             report["lag_seconds"] = lag
             breaker = self._breaker() if self._breaker else None
             if breaker:
@@ -364,7 +453,12 @@ class ConsistencyChecker:
                     summary += " (DR breaker is OPEN: replication is held, differences are expected)"
             else:
                 summary = f"{len(report['tables'])} table(s) identical"
-            if findings and not (breaker and breaker.get("state") == "OPEN"):
+            resync_supported = src.engine == dst.engine and src.engine in RESYNC_ENGINES
+            report["resync_supported"] = resync_supported
+            if findings and not resync_supported:
+                summary += (f" (no automatic resync for {src.engine}: repair through the native replication, "
+                            "e.g. reseed the availability group or re-instantiate the standby)")
+            if findings and resync_supported and not (breaker and breaker.get("state") == "OPEN"):
                 payload = {"source": src.name, "target": dst.name,
                            "tables": drift_tables, "schema_issues": [s["table"] for s in report["schema"]]}
                 prefix = f"dr-resync:{src.name}->{dst.name}:"
@@ -394,6 +488,22 @@ class ConsistencyChecker:
                                 detail={"pair": dst.name, "status": status, "summary": summary[:500]})
         return {"id": run_id, "pair": dst.name, "status": status, "summary": summary, "report": report,
                 "proposal_id": proposal_id, "started_at": started.isoformat(), "finished_at": finished.isoformat()}
+
+    def _sqlserver_lag_from_primary(self, src: DatabaseSpec) -> float | None:
+        """Largest secondary_lag_seconds of this database's secondaries, read on the primary (SQL Server
+        2016+; needs VIEW SERVER PERFORMANCE STATE on 2022+, VIEW SERVER STATE before). None if the
+        database is in no availability group or the permission is missing."""
+        conn, _ = self._reg.connect(src)
+        try:
+            rows = _sql_rows(conn, "sqlserver",
+                             "SELECT MAX(secondary_lag_seconds) FROM sys.dm_hadr_database_replica_states "
+                             "WHERE database_id = DB_ID() AND is_local = 0")
+            v = rows[0][0] if rows else None
+            return None if v is None else float(v)
+        except Exception:
+            return None
+        finally:
+            conn.close()
 
     def list_runs(self, pair: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         q = select(ConsistencyRunRow).order_by(ConsistencyRunRow.started_at.desc()).limit(max(1, min(limit, 500)))

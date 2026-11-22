@@ -54,3 +54,26 @@ describe("DR consistency", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.path === "/databases/dr-mysql/consistency")).toBe(true));
   });
 });
+
+describe("DR consistency without automatic resync", () => {
+  it("says a SQL Server pair has no automatic resync and shows the common columns compared", async () => {
+    const run = { id: "r2", pair: "dr-mssql", status: "DRIFT",
+      summary: "1 schema difference(s); 1 table(s) with different data: dbo.orders (no automatic resync for sqlserver: repair through the native replication, e.g. reseed the availability group or re-instantiate the standby)",
+      report: { source: "orders-mssql", target: "dr-mssql", schema: [{ table: "dbo.orders", issue: "columns differ" }], lag_seconds: null,
+        resync_supported: false,
+        tables: { "dbo.orders": { source_rows: 10, target_rows: 10, match: false, checksum: "differ", compared_columns: ["id", "amount"] } } },
+      triggered_by: "alice", proposal_id: null, started_at: "2026-11-20T10:00:00+00:00", finished_at: "2026-11-20T10:00:05+00:00" };
+    const { api } = fakeApi([
+      { method: "GET", path: "/databases", reply: [entry({ name: "orders-mssql", engine: "sqlserver" }),
+        entry({ name: "dr-mssql", engine: "sqlserver", role: "dr", dr_of: "orders-mssql" })] },
+      { method: "GET", path: "/databases/consistency", reply: [run] },
+    ]);
+    const user = me({ features: { aiops: false, finops: false, jit: false, dr: false, databases: true, consistency: true } }, { approve: false, operate: true });
+    renderAt(<Databases />, { api, user, path: "/?tab=consistency" });
+    expect(await screen.findByText("no automatic resync")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /^p-/ })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Report" }));
+    expect(screen.getByText("common columns: id, amount")).toBeInTheDocument();
+    expect(screen.getByText("columns differ", { exact: false })).toBeInTheDocument();
+  });
+});

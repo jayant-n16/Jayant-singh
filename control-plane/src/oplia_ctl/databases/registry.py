@@ -40,7 +40,10 @@ from oplia_ctl.timeutil import iso_utc
 
 Engine = Literal["postgres", "mysql", "mongodb", "cockroachdb", "sqlserver", "oracle"]
 # engines the DR consistency check and resync support (a dr_of pair must use one of these)
-DR_ENGINES = ("postgres", "mysql", "mongodb", "cockroachdb")
+DR_ENGINES = ("postgres", "mysql", "mongodb", "cockroachdb", "sqlserver", "oracle")
+# engines whose drift can be repaired by an approved dr.resync (SQL Server / Oracle: check only - repair
+# with the native replication, e.g. reseed the availability group or re-instantiate the Data Guard standby)
+RESYNC_ENGINES = ("postgres", "mysql", "mongodb", "cockroachdb")
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_$-]{0,62}$")
 
 
@@ -273,7 +276,35 @@ def _oracle_health(conn: Any) -> dict[str, Any]:
             out["read_only"] = "READ ONLY" in str(mode)
         except Exception as exc:
             out["replication"] = {"status_error": type(exc).__name__}
+        if out["role"] not in ("primary", "unknown"):
+            # Data Guard: V$DATAGUARD_STATS has rows only on the standby (SELECT_CATALOG_ROLE)
+            try:
+                cur.execute("SELECT name, value FROM v$dataguard_stats WHERE name IN ('apply lag', 'transport lag')")
+                stats = {str(n): v for n, v in cur.fetchall()}
+                out["replication"] = {"data_guard": True,
+                                      "lag_seconds": oracle_interval_seconds(stats.get("apply lag")),
+                                      "transport_lag_seconds": oracle_interval_seconds(stats.get("transport lag")),
+                                      "apply_lag_raw": stats.get("apply lag")}
+            except Exception as exc:
+                out["replication"] = {"status_error": type(exc).__name__}
     return out
+
+
+_INTERVAL = re.compile(r"^\s*([+-])?(\d+)\s+(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?\s*$")
+
+
+def oracle_interval_seconds(value: Any) -> float | None:
+    """Seconds from an Oracle day-to-second interval string such as '+00 00:01:05'. Oracle documents
+    V$DATAGUARD_STATS.VALUE only as VARCHAR2, so anything else is reported as unknown (None) and the
+    raw value is kept next to it."""
+    if value is None:
+        return None
+    m = _INTERVAL.match(str(value))
+    if not m:
+        return None
+    sign = -1 if m.group(1) == "-" else 1
+    d, h, mi, se = (int(m.group(i)) for i in range(2, 6))
+    return float(sign * (((d * 24 + h) * 60 + mi) * 60 + se))
 
 
 def _mongo_health(client: Any) -> dict[str, Any]:

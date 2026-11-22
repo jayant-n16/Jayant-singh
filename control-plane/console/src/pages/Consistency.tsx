@@ -34,7 +34,9 @@ export default function Consistency() {
     <section role="tabpanel" aria-label="DR consistency">
       <p className="muted">
         Compares each DR copy with its source: schema, row counts, chunked checksums (same engine, primary key) and replication lag.
-        Differences are re-checked once before they count. Drift raises a resync proposal; nothing changes without approval.
+        Differences are re-checked once before they count. Drift raises a resync proposal (PostgreSQL, MySQL, CockroachDB, MongoDB;
+        a repeat of the same drift reuses the open one); nothing changes without approval. SQL Server and Oracle pairs are
+        checked only: repair them through their own replication.
       </p>
       <ErrorNote error={dbs.error ?? runs.error} />
       {runError ? <div className="note note-danger" role="alert">Check could not run: {errorMessage(runError)}</div> : null}
@@ -54,7 +56,8 @@ export default function Consistency() {
                   <td className="wrap">{r?.summary ?? "—"}</td>
                   <td>{typeof r?.report.lag_seconds === "number" ? `${r.report.lag_seconds.toFixed(1)} s` : "—"}</td>
                   <td>{r ? <>{fmtTime(r.finished_at)}<div className="small muted">{r.triggered_by}</div></> : "—"}</td>
-                  <td>{r?.proposal_id ? <Link className="mono" to={`/proposals/${r.proposal_id}`}>{shortId(r.proposal_id)}</Link> : "—"}</td>
+                  <td>{r?.proposal_id ? <Link className="mono" to={`/proposals/${r.proposal_id}`}>{shortId(r.proposal_id)}</Link>
+                    : r?.status === "DRIFT" && r.report.resync_supported === false ? <span className="small muted">no automatic resync</span> : "—"}</td>
                   <td className="row-actions">
                     <button className="btn" disabled={busy !== null} onClick={() => void run(d.name)}>{busy === d.name ? "Checking…" : "Run check"}</button>
                     {r ? <button className="btn btn-small" aria-expanded={open === r.id} onClick={() => setOpen(open === r.id ? null : r.id)}>Report</button> : null}
@@ -86,12 +89,13 @@ function Report({ run }: { run: ConsistencyRun | undefined }) {
       ) : null}
       {tables.length ? (
         <TableWrap label="Tables">
-          <thead><tr><th>Table</th><th>Source rows</th><th>DR rows</th><th>Checksum</th><th>Result</th></tr></thead>
+          <thead><tr><th>Table</th><th>Source rows</th><th>DR rows</th><th>Checksum</th><th>Compared on</th><th>Result</th></tr></thead>
           <tbody>
             {tables.map(([name, t]) => (
               <tr key={name}>
                 <td className="mono">{name}</td><td>{t.source_rows}</td><td>{t.target_rows}</td>
                 <td className="small">{t.checksum ?? "—"}{t.rechecked ? " (re-checked)" : ""}</td>
+                <td className="small">{t.compared_columns ? `common columns: ${t.compared_columns.join(", ")}` : "all columns"}</td>
                 <td>{t.match ? <Badge value="CONSISTENT" /> : <Badge value="DRIFT" />}</td>
               </tr>
             ))}

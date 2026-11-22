@@ -301,3 +301,105 @@ def test_api_consistency_endpoints(gate, session_factory):
     runs = client.get("/databases/consistency", params={"pair": "dr"}, headers=op).json()
     assert [x["status"] for x in runs] == ["FAILED"] and runs[0]["triggered_by"] == "bob"
     assert client.get("/me", headers=op).json()["features"]["consistency"] is True
+
+
+# ----------------------------------------------------------------------------- SQL Server / Oracle
+MSSQL_URL = os.environ.get("OPLIA_TEST_MSSQL_URL", "")      # sqlserver://sa:...@localhost:1433/oplia_odl
+ORACLE_URL = os.environ.get("OPLIA_TEST_ORACLE_URL", "")    # oracle://oplia:...@localhost:1521/FREEPDB1
+
+
+def test_keyset_predicate_without_row_values():
+    from oplia_ctl.databases.consistency import _after, _after_params
+
+    assert _after("sqlserver", ["a", "b"]) == "(([a] > %s) OR ([a] = %s AND [b] > %s))"
+    assert _after("oracle", ["A", "B"]) == '(("A" > :1) OR ("A" = :2 AND "B" > :3))'
+    assert _after_params("oracle", (1, 2)) == (1, 1, 2)
+    assert _after("postgres", ["a", "b"]) == '("a", "b") > (%s, %s)'
+
+
+def test_oracle_interval_parsing():
+    from oplia_ctl.databases.registry import oracle_interval_seconds
+
+    assert oracle_interval_seconds("+00 00:01:05") == 65.0
+    assert oracle_interval_seconds("+01 02:00:00") == 93600.0
+    assert oracle_interval_seconds(None) is None and oracle_interval_seconds("unknown") is None
+
+
+def _pair_check(gate, session_factory, engine, secrets, src_db, dst_db, change_dr, table):
+    specs = _specs(engine, src_db, dst_db)
+    _reg, checker = _checker(gate, session_factory, specs, secrets)
+    r = checker.run("dr", triggered_by="alice")
+    assert r["status"] == "CONSISTENT", r
+    assert r["report"]["tables"][table]["checksum"] == "match"
+    assert r["report"]["resync_supported"] is False
+    change_dr()
+    r = checker.run("dr", triggered_by="alice")
+    assert r["status"] == "DRIFT" and r["report"]["tables"][table]["checksum"] == "differ", r
+    assert r["proposal_id"] is None and "no automatic resync" in r["summary"]
+    assert not [p for p in gate.list() if p.action_type == ACTION_DR_RESYNC]
+    return r
+
+
+@pytest.mark.skipif(not MSSQL_URL, reason="needs SQL Server (OPLIA_TEST_MSSQL_URL)")
+def test_sqlserver_pair_consistency(gate, session_factory):
+    from urllib.parse import unquote, urlsplit
+
+    import pymssql
+
+    u = urlsplit(MSSQL_URL)
+    kw = {"server": u.hostname, "port": u.port or 1433, "user": unquote(u.username), "password": unquote(u.password),
+          "autocommit": True}
+    with pymssql.connect(database="master", **kw) as admin:
+        cur = admin.cursor()
+        for db in ("cc_src", "cc_dr"):
+            cur.execute(f"IF DB_ID('{db}') IS NOT NULL BEGIN ALTER DATABASE {db} SET SINGLE_USER WITH ROLLBACK "
+                        f"IMMEDIATE; DROP DATABASE {db}; END")
+            cur.execute(f"CREATE DATABASE {db}")
+    conns = {db: pymssql.connect(database=db, **kw) for db in ("cc_src", "cc_dr")}
+    try:
+        for c in conns.values():
+            cur = c.cursor()
+            cur.execute("CREATE TABLE dbo.orders (id int NOT NULL, line int NOT NULL, amount decimal(12,2), "
+                        "note nvarchar(40), PRIMARY KEY (id, line))")
+            cur.execute("INSERT INTO dbo.orders SELECT n / 3, n % 3, n * 1.5, CONCAT(N'n', n) FROM (SELECT TOP (430) "
+                        "ROW_NUMBER() OVER (ORDER BY a.object_id) n FROM sys.all_objects a CROSS JOIN "
+                        "sys.all_objects b) x")
+        base = MSSQL_URL.rsplit("/", 1)[0]
+        _pair_check(gate, session_factory, "sqlserver", {"s": f"{base}/cc_src", "d": f"{base}/cc_dr"}, None, None,
+                    lambda: conns["cc_dr"].cursor().execute("UPDATE dbo.orders SET note = N'x' WHERE id = 120 "
+                                                            "AND line = 1"), "dbo.orders")
+    finally:
+        for c in conns.values():
+            c.close()
+
+
+@pytest.mark.skipif(not ORACLE_URL, reason="needs Oracle (OPLIA_TEST_ORACLE_URL)")
+def test_oracle_pair_consistency(gate, session_factory):
+    from urllib.parse import unquote, urlsplit
+
+    import oracledb
+
+    u = urlsplit(ORACLE_URL)
+    pw = unquote(u.password)
+    dsn = f"{u.hostname}:{u.port or 1521}/{u.path.lstrip('/')}"
+    sysconn = oracledb.connect(user="system", password=pw, dsn=dsn)   # the CI container's ORACLE_PASSWORD
+    try:
+        cur = sysconn.cursor()
+        for owner in ("CC_SRC", "CC_DR"):
+            cur.execute(f"BEGIN EXECUTE IMMEDIATE 'DROP USER {owner} CASCADE'; EXCEPTION WHEN OTHERS THEN NULL; END;")
+            cur.execute(f'CREATE USER {owner} IDENTIFIED BY "{pw}" QUOTA UNLIMITED ON USERS')
+            cur.execute(f"CREATE TABLE {owner}.ORDERS (ID NUMBER(10) PRIMARY KEY, AMOUNT NUMBER(12,2), "
+                        "NOTE VARCHAR2(40), BODY CLOB)")
+            cur.execute(f"INSERT INTO {owner}.ORDERS SELECT level, level * 1.5, 'n' || level, "  # noqa: S608
+                        "TO_CLOB('doc ' || level) FROM dual CONNECT BY level <= 260")
+        sysconn.commit()
+        url = f"oracle://system:{u.password}@{u.hostname}:{u.port or 1521}{u.path}"
+
+        def change():
+            c = sysconn.cursor()
+            c.execute("UPDATE CC_DR.ORDERS SET BODY = TO_CLOB('changed') WHERE ID = 200")   # only the CLOB differs
+            sysconn.commit()
+
+        _pair_check(gate, session_factory, "oracle", {"s": url, "d": url}, "CC_SRC", "CC_DR", change, "ORDERS")
+    finally:
+        sysconn.close()
