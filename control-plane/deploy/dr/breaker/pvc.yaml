@@ -1,0 +1,10 @@
+# Quarantine dumps of held bundles (full incident evidence) survive pod restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oplia-dr-quarantine
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi

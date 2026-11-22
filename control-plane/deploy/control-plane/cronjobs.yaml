@@ -1,0 +1,866 @@
+# Read-only FinOps audit (writes nothing). Suspended: run on demand with kubectl create job --from=cronjob/oplia-finops-audit.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-finops-audit
+spec:
+  schedule: "0 0 1 1 *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: true
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-finops-scan", "--audit"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# FinOps tag compliance scan.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-finops-scan
+spec:
+  schedule: "17 */6 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-finops-scan"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# Idle-resource observation (proposals only).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-finops-observe
+spec:
+  schedule: "41 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-finops-optimize", "observe"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# Executes approved clean-ups inside maintenance windows.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-finops-window
+spec:
+  schedule: "*/15 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-finops-optimize", "window"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# 90-day inactive account sweep (circuit breaker protected).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-identity-sweep
+spec:
+  schedule: "23 3 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-identity-sweep"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# Environment TTL lifecycle scan.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-iac-lifecycle
+spec:
+  schedule: "7 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-iac-lifecycle"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# Compute inventory (AWS, Azure, GCP, IBM) for the Infrastructure screen; read-only.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-inventory-scan
+spec:
+  schedule: "*/30 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-inventory-scan"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# Read-only health check of every database in OPLIA_DATABASES (Databases screen).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-db-health
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-db-health"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# DR consistency: compare every DR copy (dr_of) with its source; drift raises a dr.resync proposal.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-db-consistency
+spec:
+  schedule: "37 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-db-consistency"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# plans each object pair; creates a dr.object_sync proposal where there is work (approval required)
+# DR consistency: compare every DR copy (dr_of) with its source; drift raises a dr.resync proposal.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-dr-object-plan
+spec:
+  schedule: "17 */2 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-dr-object-plan"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# advances approved image replication jobs one persisted step at a time
+# DR consistency: compare every DR copy (dr_of) with its source; drift raises a dr.resync proposal.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-dr-image-worker
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-dr-image-worker"]
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600
+---
+# advances approved image replication jobs one persisted step at a time
+# DR consistency: compare every DR copy (dr_of) with its source; drift raises a dr.resync proposal.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: oplia-dr-job-worker
+spec:
+  schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  suspend: false
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: oplia-control-plane
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: job
+              image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+              command: ["oplia-dr-job-worker"]   # restore drills and the other persisted DR jobs
+              envFrom:
+                - configMapRef:
+                    name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+                - configMapRef:
+                    name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+                - secretRef:
+                    name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+              env:
+                - name: OPLIA_SECRET_PROVIDER
+                  value: vault
+                - name: OPLIA_VAULT_AUTH_METHOD
+                  value: kubernetes
+                - name: OPLIA_VAULT_KUBERNETES_ROLE
+                  value: oplia-control-plane
+                - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+                  value: /var/run/secrets/vault/token
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: vault-token
+                  mountPath: /var/run/secrets/vault
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 3600

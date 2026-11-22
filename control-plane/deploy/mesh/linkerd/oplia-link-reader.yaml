@@ -1,0 +1,26 @@
+# Read-only access for OPLIA's Network screen (OPLIA_NETWORK_LINKERD_LINKS=true): list Linkerd
+# multicluster Link resources. Nothing else; OPLIA never changes mesh configuration.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: oplia-linkerd-link-reader
+rules:
+  - apiGroups: ["multicluster.linkerd.io"]
+    resources: ["links"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: oplia-linkerd-link-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: oplia-linkerd-link-reader
+subjects:
+  - kind: ServiceAccount
+    name: oplia-control-plane
+    namespace: oplia-system
+  - kind: ServiceAccount
+    name: oplia-api               # the API serves the Network screen
+    namespace: oplia-system

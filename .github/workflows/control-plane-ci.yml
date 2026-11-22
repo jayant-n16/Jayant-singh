@@ -1,0 +1,464 @@
+name: control-plane CI
+
+on:
+  pull_request:
+    paths:
+      - "control-plane/**"
+      - ".github/workflows/control-plane-ci.yml"
+  push:
+    branches: [feature/control-plane]
+    paths:
+      - "control-plane/**"
+      - ".github/workflows/control-plane-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: oplia_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    defaults:
+      run:
+        working-directory: control-plane
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: System packages (python-ldap build headers, OpenLDAP for AD-driver integration tests)
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q libldap-dev libsasl2-dev slapd ldap-utils shellcheck qemu-utils \
+            redis-server
+          sudo systemctl stop slapd || true
+          # the packaged AppArmor profile only allows slapd's default paths; the test server runs from RUNNER_TEMP
+          if [ -f /etc/apparmor.d/usr.sbin.slapd ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.slapd || true; fi
+          # MySQL 8 for the DR read-only-lock integration test (runner image ships mysqld; profile limits datadir)
+          sudo systemctl stop mysql || true
+          if [ -f /etc/apparmor.d/usr.sbin.mysqld ]; then sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mysqld || true; fi
+      - name: Install
+        run: python -m pip install --upgrade pip && CASS_DRIVER_NO_CYTHON=1 pip install -e ".[dev,postgres,gcp,ad,dr,targets]"
+      - name: Start test LDAP server
+        run: scripts/test-slapd.sh "$RUNNER_TEMP/slapd" | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: Start test MySQL server
+        run: scripts/test-mysql.sh "$RUNNER_TEMP/mysql" | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: OpenBao 2.5.3 for the Vault driver tests (checksum verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          base=https://github.com/openbao/openbao/releases/download/v2.5.3
+          curl -sSfLO "$base/bao_2.5.3_Linux_x86_64.tar.gz"
+          curl -sSfL "$base/checksums-linux.txt" | grep " bao_2.5.3_Linux_x86_64.tar.gz$" | sha256sum -c -
+          mkdir -p bao-bin && tar xzf bao_2.5.3_Linux_x86_64.tar.gz -C bao-bin bao
+          echo "$RUNNER_TEMP/bao-bin" >> "$GITHUB_PATH"
+      - name: CNCF Distribution registry 3.0.0 for the registry replication tests (checksum pinned)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          base=https://github.com/distribution/distribution/releases/download/v3.0.0
+          curl -sSfLO "$base/registry_3.0.0_linux_amd64.tar.gz"
+          echo "61c9a2c0d5981a78482025b6b69728521fbc78506d68b223d4a2eb825de5ca3d  registry_3.0.0_linux_amd64.tar.gz" | sha256sum -c -
+          mkdir -p registry-bin && tar xzf registry_3.0.0_linux_amd64.tar.gz -C registry-bin registry
+          echo "OPLIA_TEST_REGISTRY_BIN=$RUNNER_TEMP/registry-bin/registry" >> "$GITHUB_ENV"
+      - name: Envoy 1.34.4 for the cutover/failback tests (SHA-256 from the release's checksums.txt.asc)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl -sSfL -o envoy https://github.com/envoyproxy/envoy/releases/download/v1.34.4/envoy-1.34.4-linux-x86_64
+          echo "427485f45ed6876ec42c97a1962918739bf5946fe159d8b0b27f198406da5e0e  envoy" | sha256sum -c -
+          chmod +x envoy
+          ./envoy --version
+          echo "OPLIA_TEST_ENVOY_BIN=$RUNNER_TEMP/envoy" >> "$GITHUB_ENV"
+      - name: Start test OpenBao server
+        run: |
+          set -euo pipefail
+          out=$(BAO_BIN="$RUNNER_TEMP/bao-bin/bao" scripts/test-openbao.sh "$RUNNER_TEMP/bao")
+          echo "::add-mask::$(echo "$out" | sed -n 's/^export BAO_TOKEN=//p')"
+          echo "$out" | sed 's/^export //' >> "$GITHUB_ENV"
+      - name: MongoDB 7.0, CockroachDB 24.3 and a logical-replication PostgreSQL for integration tests
+        run: |
+          set -euo pipefail
+          docker run -d --name oplia-mongo -p 27017:27017 mongo:7.0.14
+          docker run -d --name oplia-crdb -p 26257:26257 cockroachdb/cockroach:v24.3.5 start-single-node --insecure
+          # PostgreSQL with wal_level=logical for the CDC lag-probe test (the service container cannot take -c flags)
+          docker run -d --name oplia-pg-logical -p 55433:5432 -e POSTGRES_PASSWORD=postgres postgres:16 \
+            -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+          for i in $(seq 1 60); do
+            docker exec oplia-mongo mongosh --quiet --eval 'db.runCommand({ping: 1}).ok' 2>/dev/null | grep -q 1 && break
+            sleep 2
+          done
+          for i in $(seq 1 60); do
+            docker exec oplia-crdb ./cockroach sql --insecure -e 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec oplia-mongo mongosh --quiet --eval 'db.version()'
+          docker exec oplia-crdb ./cockroach version | head -1
+          echo "OPLIA_TEST_MONGO_URL=mongodb://localhost:27017" >> "$GITHUB_ENV"
+          echo "OPLIA_TEST_CRDB_URL=postgresql://root@localhost:26257/defaultdb?sslmode=disable" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do docker exec oplia-pg-logical pg_isready -U postgres >/dev/null 2>&1 && break; sleep 2; done
+          docker exec oplia-pg-logical psql -U postgres -tc "SHOW wal_level"
+          echo "OPLIA_TEST_PG_LOGICAL_URL=postgresql://postgres:postgres@localhost:55433/postgres" >> "$GITHUB_ENV"
+      - name: SQL Server 2022 (Developer edition) and Oracle Database Free 23 for the online-DDL tests
+        run: |
+          set -euo pipefail
+          pw="Op1$(openssl rand -hex 12)"
+          echo "::add-mask::$pw"
+          docker run -d --name oplia-mssql -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_PID=Developer \
+            -e "MSSQL_SA_PASSWORD=$pw" mcr.microsoft.com/mssql/server:2022-latest
+          docker run -d --name oplia-oracle -p 1521:1521 -e "ORACLE_PASSWORD=$pw" -e APP_USER=oplia \
+            -e "APP_USER_PASSWORD=$pw" gvenzl/oracle-free:23-slim-faststart
+          for i in $(seq 1 90); do
+            docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -Q "SELECT 1" \
+              >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -h -1 \
+            -Q "SET NOCOUNT ON; SELECT CAST(SERVERPROPERTY('Edition') AS nvarchar(64)) + ' ' + CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(32))"
+          docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -Q "CREATE DATABASE oplia_odl"
+          for i in $(seq 1 150); do
+            docker logs oplia-oracle 2>&1 | grep -q "DATABASE IS READY TO USE" && break
+            sleep 2
+          done
+          docker logs oplia-oracle 2>&1 | grep -E "DATABASE IS READY|Oracle Database" | tail -2
+          echo "OPLIA_TEST_MSSQL_URL=sqlserver://sa:$pw@localhost:1433/oplia_odl" >> "$GITHUB_ENV"
+          echo "OPLIA_TEST_ORACLE_URL=oracle://oplia:$pw@localhost:1521/FREEPDB1" >> "$GITHUB_ENV"
+      - name: Azurite (Azure Storage emulator, Table API) for the Table writer test
+        run: |
+          set -euo pipefail
+          docker run -d --name oplia-azurite -p 10002:10002 mcr.microsoft.com/azure-storage/azurite \
+            azurite-table --tableHost 0.0.0.0 --skipApiVersionCheck
+          for i in $(seq 1 30); do (echo > /dev/tcp/127.0.0.1/10002) 2>/dev/null && break; sleep 1; done
+          # Azurite's documented, public development-account key (not a secret)
+          key="Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+          echo "OPLIA_TEST_AZURITE_TABLES=DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$key;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;" >> "$GITHUB_ENV"
+      - name: Shell scripts (shellcheck)
+        run: shellcheck scripts/*.sh deploy/vault/scripts/*.sh
+      - name: Lint
+        run: ruff check src tests migrations
+      - name: Type check
+        run: mypy
+      - name: Security scan
+        run: bandit -r src -q
+      - name: Tests (SQLite)
+        run: pytest -rs
+      - name: Vault deploy scripts against OpenBao and PostgreSQL
+        env:
+          VAULT_CLI: bao
+          OPLIA_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/oplia_test
+        run: scripts/test-vault-deploy.sh
+      - name: Tests (PostgreSQL, schema from migrations)
+        env:
+          OPLIA_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/oplia_test
+        run: pytest -rs
+      - name: Migrations match models
+        env:
+          OPLIA_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/oplia_test
+        run: alembic upgrade head && alembic check
+
+  console:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: control-plane/console
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+      - name: Install (lockfile, pinned npm)
+        run: npx -y npm@11.21.1 ci --no-fund
+      - name: Dependency audit
+        run: npx -y npm@11.21.1 audit --audit-level=low
+      - name: Type check (strict)
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npx vite build
+
+  console-e2e:
+    # Browser tests against the real console image (non-root, read-only root filesystem),
+    # the API and the local dev login.
+    needs: console
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OPLIA_E2E_WEBHOOK_SECRET: ci-e2e-webhook-secret
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "22"
+      - name: Install the control plane
+        working-directory: control-plane
+        run: pip install -e .
+      - name: Install console dependencies and Chromium
+        working-directory: control-plane/console
+        run: |
+          npx -y npm@11.21.1 ci --no-fund --no-audit
+          npx playwright install --with-deps chromium
+      - name: Build the console image
+        working-directory: control-plane/console
+        run: docker build -t oplia-console:ci .
+      - name: Start dev login and API
+        working-directory: ${{ runner.temp }}
+        env:
+          OPLIA_ENVIRONMENT: dev
+        run: |
+          nohup oplia-dev-idp > idp.log 2>&1 &
+          OPLIA_DATABASE_URL="sqlite:///$RUNNER_TEMP/e2e.db" OPLIA_OIDC_ISSUER=http://127.0.0.1:8090/ \
+          OPLIA_OIDC_AUDIENCE=oplia-api OPLIA_OIDC_JWKS_URL=http://127.0.0.1:8090/jwks \
+          OPLIA_SECRET_WEBHOOK_HMAC_SECRET="$OPLIA_E2E_WEBHOOK_SECRET" \
+            nohup uvicorn oplia_ctl.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/healthz >/dev/null && curl -sf http://127.0.0.1:8090/jwks >/dev/null && exit 0
+            sleep 1
+          done
+          cat idp.log api.log; exit 1
+      - name: Start the console container (UID 1001, read-only root filesystem)
+        run: |
+          docker run -d --name oplia-console --network host --read-only --tmpfs /tmp --user 1001 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -e OPLIA_CONSOLE_AUTHORITY=http://127.0.0.1:8090/ -e OPLIA_CONSOLE_ALLOW_HTTP_AUTHORITY=true \
+            -e OPLIA_CONSOLE_CLIENT_ID=oplia-console -e OPLIA_CONSOLE_API_UPSTREAM=http://127.0.0.1:8000 \
+            -e OPLIA_CONSOLE_ENVIRONMENT_LABEL="CI" oplia-console:ci
+          for i in $(seq 1 30); do curl -sf http://localhost:8080/healthz >/dev/null && break; sleep 1; done
+          docker logs oplia-console
+          curl -sf http://localhost:8080/config.json
+          curl -sf http://localhost:8080/api/healthz
+      - name: Console refuses unsafe settings
+        run: |
+          set +e
+          out=$(docker run --rm -e OPLIA_CONSOLE_AUTHORITY=http://idp.example.com/ -e OPLIA_CONSOLE_CLIENT_ID=c \
+                  -e OPLIA_CONSOLE_API_UPSTREAM=http://api oplia-console:ci 2>&1); rc=$?
+          echo "$out"
+          [ $rc -ne 0 ] && echo "$out" | grep -q "must be https://"
+      - name: Browser tests (Playwright)
+        working-directory: control-plane/console
+        env:
+          OPLIA_E2E_BASE_URL: http://localhost:8080
+        run: npx playwright test
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker logs oplia-console || true
+          cat "$RUNNER_TEMP/api.log" "$RUNNER_TEMP/idp.log" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: playwright-report
+          path: control-plane/console/playwright-report
+          retention-days: 7
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Build image (accepting the Microsoft ODBC Driver 18 EULA for this CI build)
+        run: docker build --build-arg ACCEPT_MSODBCSQL18_EULA=Y -t oplia-control-plane:ci control-plane
+      - name: Warehouse MERGE writer through pyodbc + ODBC Driver 18 inside the image, against SQL Server 2022
+        run: |
+          set -euo pipefail
+          pw="Op1$(openssl rand -hex 12)"
+          echo "::add-mask::$pw"
+          docker run -d --name oplia-mssql -p 1433:1433 -e ACCEPT_EULA=Y -e MSSQL_PID=Developer \
+            -e "MSSQL_SA_PASSWORD=$pw" mcr.microsoft.com/mssql/server:2022-latest
+          for i in $(seq 1 90); do
+            docker exec oplia-mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$pw" -Q "SELECT 1" \
+              >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker run --rm --user 1001 oplia-control-plane:ci rpm -q msodbcsql18
+          docker run --rm --user 1001 --network host -v "$PWD/control-plane/scripts:/smoke:ro" \
+            -e "OPLIA_ODBC_CONN=DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;DATABASE=master;UID=sa;PWD=$pw;Encrypt=yes;TrustServerCertificate=yes" \
+            oplia-control-plane:ci python /smoke/odbc-merge-smoke.py
+      - name: Smoke test image
+        run: |
+          docker run --rm --user 1001 oplia-control-plane:ci python -c "import oplia_ctl.main, oplia_ctl.soar.exporter, oplia_ctl.finops.config, google.cloud.asset_v1, google.cloud.compute_v1, azure.mgmt.compute, oplia_ctl.identity.config, oplia_ctl.identity.providers.ad, oplia_ctl.dr.config, sqlglot, bson, confluent_kafka, pymysql, ldap; print('import ok, python-ldap', ldap.__version__, 'OpenLDAP', ldap.VENDOR_VERSION)"
+          for cmd in oplia-finops-scan oplia-finops-optimize oplia-aiops-escalator oplia-jit-worker oplia-identity-sweep oplia-dr-breaker; do
+            docker run --rm --user 1001 oplia-control-plane:ci "$cmd" --help > /dev/null
+          done
+
+  monitoring-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: control-plane/examples/aiops
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: download promtool and amtool (checksum verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          for r in "prometheus v3.5.0" "alertmanager v0.28.1"; do
+            set -- $r; v=${2#v}; f=$1-$v.linux-amd64.tar.gz
+            curl -sSfLO "https://github.com/prometheus/$1/releases/download/$2/$f"
+            curl -sSfL "https://github.com/prometheus/$1/releases/download/$2/sha256sums.txt" | grep " $f\$" | sha256sum -c -
+            tar xzf "$f"
+          done
+          echo "$RUNNER_TEMP/prometheus-3.5.0.linux-amd64" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/alertmanager-0.28.1.linux-amd64" >> "$GITHUB_PATH"
+      - name: promtool check and unit-test rules
+        run: |
+          promtool check rules prometheus-rules.example.yaml
+          promtool test rules prometheus-rules.test.yaml
+      - name: amtool check receiver fragment
+        run: |
+          set -euo pipefail
+          printf 'token' > "$RUNNER_TEMP/token"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import sys, yaml
+          d = yaml.safe_load(open("alertmanager-receiver.yaml"))
+          d["route"]["receiver"] = "oplia-aiops"
+          d["receivers"][0]["webhook_configs"][0]["http_config"]["authorization"]["credentials_file"] = sys.argv[1] + "/token"
+          open(sys.argv[1] + "/am.yml", "w").write(yaml.safe_dump(d))
+          PY
+          amtool check-config "$RUNNER_TEMP/am.yml"
+
+  manifests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: control-plane/deploy
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: download kustomize and kubeconform (checksum verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          curl -sSfLO https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          curl -sSfL https://github.com/yannh/kubeconform/releases/download/v0.6.7/CHECKSUMS | grep " kubeconform-linux-amd64.tar.gz$" | sha256sum -c -
+          tar xzf kubeconform-linux-amd64.tar.gz kubeconform
+          curl -sSfLO https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/kustomize_v5.4.3_linux_amd64.tar.gz
+          curl -sSfL https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.3/checksums.txt | grep " kustomize_v5.4.3_linux_amd64.tar.gz$" | sha256sum -c -
+          tar xzf kustomize_v5.4.3_linux_amd64.tar.gz
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: build and validate every kustomization (strict, Kubernetes 1.30)
+        run: |
+          set -euo pipefail
+          for k in $(find . -name kustomization.yaml -not -path "*/base/*" -exec dirname {} \; | sort); do
+            echo "::group::$k"
+            kustomize build "$k" | kubeconform -strict -summary -kubernetes-version 1.30.0 -skip ServiceExport -
+            echo "::endgroup::"
+          done
+          kubeconform -strict -summary -kubernetes-version 1.30.0 vault/k8s/token-reviewer.yaml
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.0
+      - name: service meshes render at the pinned chart versions (Consul 2.1.0, Linkerd edge 2026.10.2)
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet "jsonschema==4.26.0" "PyYAML==6.0.3"
+          # CRD objects themselves have no published schema for kubeconform; they are the vendors'
+          # definitions. Our own custom resources are validated against them (validate-crs.py).
+          kc() { kubeconform -strict -summary -kubernetes-version 1.30.0 -skip CustomResourceDefinition "$@"; }
+          ht() { helm template --kube-version 1.30.0 --api-versions policy/v1/PodDisruptionBudget "$@"; }
+          # Linkerd edge 2026.10.2 declares kubeVersion >=1.31.0, so it is rendered and checked for 1.31
+          kc131() { kubeconform -strict -summary -kubernetes-version 1.31.0 -skip CustomResourceDefinition "$@"; }
+          ht131() { helm template --kube-version 1.31.0 --api-versions policy/v1/PodDisruptionBudget "$@"; }
+          helm repo add hashicorp https://helm.releases.hashicorp.com
+          helm repo add linkerd-edge https://helm.linkerd.io/edge
+          helm repo update
+          r=$(mktemp -d)
+          ht consul hashicorp/consul --version 2.1.0 -n consul -f mesh/consul/values.yaml > "$r/consul.yaml"
+          kc "$r/consul.yaml"
+          python3 ../scripts/validate-crs.py "$r/consul.yaml" mesh/consul/config-entries.yaml mesh/consul/peering-acceptor.yaml
+          kc mesh/linkerd/oplia-link-reader.yaml
+          # throw-away CA and issuer for rendering only (real ones come from Vault PKI)
+          t=$(mktemp -d)
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 -subj "/CN=root.linkerd.cluster.local" \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" -keyout "$t/ca.key" -out "$t/ca.crt"
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=identity.linkerd.cluster.local" -keyout "$t/issuer.key" -out "$t/issuer.csr"
+          printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$t/ext"
+          openssl x509 -req -in "$t/issuer.csr" -CA "$t/ca.crt" -CAkey "$t/ca.key" -CAcreateserial -days 1 -extfile "$t/ext" -out "$t/issuer.crt"
+          ht131 linkerd-crds linkerd-edge/linkerd-crds --version 2026.10.2 -n linkerd > "$r/l5d-crds.yaml"
+          kc131 "$r/l5d-crds.yaml"
+          ht131 linkerd-control-plane linkerd-edge/linkerd-control-plane --version 2026.10.2 -n linkerd \
+            -f mesh/linkerd/values.yaml --set-file identityTrustAnchorsPEM="$t/ca.crt" \
+            --set-file identity.issuer.tls.crtPEM="$t/issuer.crt" --set-file identity.issuer.tls.keyPEM="$t/issuer.key" > "$r/l5d-cp.yaml"
+          ht131 linkerd-multicluster linkerd-edge/linkerd-multicluster --version 2026.10.2 -n linkerd-multicluster \
+            -f mesh/linkerd/multicluster-values.yaml > "$r/l5d-mc.yaml"
+          # Linkerd policy resources (Server, AuthorizationPolicy, ...) are checked against the CRDs
+          # from linkerd-crds; everything else with kubeconform.
+          for f in l5d-cp l5d-mc; do
+            python3 ../scripts/split-crs.py "$r/$f.yaml" "$r/$f-core.yaml" "$r/$f-crs.yaml" linkerd.io
+            kc131 "$r/$f-core.yaml"
+            if grep -q '^kind:' "$r/$f-crs.yaml"; then python3 ../scripts/validate-crs.py "$r/l5d-crds.yaml" "$r/$f-crs.yaml"; fi
+          done
+      - name: CDC connector configs are valid JSON
+        run: for f in dr/cdc/*.json; do python3 -m json.tool "$f" > /dev/null; done
+      - name: OTel sidecar config loads in the pinned collector (otelcol validate)
+        run: |
+          set -euo pipefail
+          d=$(mktemp -d)
+          # the block scalar under "config.yaml: |" (indented 4 spaces) is the collector config
+          awk 'f && /^    /{print substr($0,5); next} f && !/^[[:space:]]*$/{f=0} /^  config.yaml: \|/{f=1}' \
+            apps/base/otel-collector-config.yaml > "$d/config.yaml"
+          test -s "$d/config.yaml"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=otel-test -keyout "$d/ca.key" -out "$d/ca.crt" 2>/dev/null
+          chmod 0644 "$d"/*
+          docker run --rm -v "$d/config.yaml:/cfg/config.yaml:ro" -v "$d/ca.crt:/etc/otel/ca/ca.crt:ro" \
+            otel/opentelemetry-collector:0.163.2 validate --config=/cfg/config.yaml
+
+  terraform:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: control-plane/terraform
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+      - name: fmt
+        run: terraform fmt -check -recursive -diff
+      - name: validate modules and example root
+        run: |
+          set -euo pipefail
+          for d in modules/* examples/*; do
+            echo "::group::$d"
+            terraform -chdir="$d" init -backend=false -input=false
+            terraform -chdir="$d" validate
+            echo "::endgroup::"
+          done
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: checkov
+        run: |
+          python -m pip install --quiet "checkov==3.2.*"
+          checkov -d . --framework terraform --compact --quiet

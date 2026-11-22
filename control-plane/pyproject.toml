@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oplia-control-plane"
+version = "0.1.0"
+description = "OPLIA multi-cloud control plane: guarded remediation, SOAR export, IaC lifecycle, AIOps, FinOps, JIT access, DR circuit breaker."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "httpx>=0.27",
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "pyjwt[crypto]>=2.8",
+  "boto3>=1.34",
+  "azure-identity>=1.16",
+  "azure-mgmt-network>=25.3",
+  "azure-mgmt-resource>=23.0",
+  "azure-mgmt-compute>=33.0",
+  "azure-mgmt-trafficmanager==2.0.0",
+  "kubernetes>=29.0",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+gcp = ["google-cloud-asset>=3.26", "google-cloud-compute>=1.19"]
+ad = ["python-ldap>=3.4"]
+dr = ["sqlglot>=25", "pymongo>=4.6", "confluent-kafka>=2.4", "PyMySQL>=1.1",
+      "azure-storage-blob==12.31.1", "google-cloud-storage==3.17.1",
+      "azure-servicebus==7.15.0", "google-cloud-pubsub==2.43.0",
+      "google-cloud-datastream==1.20.0", "azure-mgmt-datamigration==10.1.0",
+      "pymssql==2.4.6", "oracledb==26.1.0"]
+# Synapse / Fabric Warehouse MERGE writer over ODBC (needs Microsoft ODBC Driver 18 - see the Dockerfile).
+warehouse = ["pyodbc==5.4.0"]
+# Target SDKs for the CDC hydration sidecar (FR-04): installed only where the sidecar runs.
+targets = ["redis==8.1.0", "azure-cosmos==4.17.1", "google-cloud-firestore==2.34.1", "google-cloud-bigtable==2.50.2",
+           "google-cloud-spanner==3.71.0", "google-cloud-bigquery==3.47.0", "gremlinpython==3.8.2",
+           "cassandra-driver==3.30.1", "azure-data-tables==12.7.0", "google-cloud-discoveryengine==0.20.6"]
+dev = [
+  "pytest>=8.0",
+  "respx>=0.21",
+  "moto[ec2,s3,rds,dynamodb,sqs,sns]>=5.0",
+  "ruff>=0.4",
+  "mypy>=1.10",
+  "bandit>=1.7",
+  "pyyaml>=6.0",
+  "jsonschema==4.26.0",          # scripts/validate-crs.py (mesh CI) and its tests
+  "types-PyYAML",
+  "libvhdi-python==20260901",    # independent VHD reader (libyal) for the differencing-VHD tests
+  "bcrypt==4.3.0",               # htpasswd for the real-registry replication tests
+]
+
+[project.scripts]
+oplia-soar-exporter = "oplia_ctl.soar.exporter:main"
+oplia-aiops-escalator = "oplia_ctl.aiops.config:escalator_main"
+oplia-finops-scan = "oplia_ctl.finops.config:scan_main"
+oplia-finops-optimize = "oplia_ctl.finops.config:optimize_main"
+oplia-jit-worker = "oplia_ctl.identity.config:worker_main"
+oplia-identity-sweep = "oplia_ctl.identity.config:sweep_main"
+oplia-dr-breaker = "oplia_ctl.dr.config:main"
+oplia-iac-lifecycle = "oplia_ctl.lifecycle.manager:main"
+oplia-dev-idp = "oplia_ctl.devidp:main"
+oplia-inventory-scan = "oplia_ctl.inventory.scanner:main"
+oplia-db-health = "oplia_ctl.databases.config:health_main"
+oplia-db-consistency = "oplia_ctl.databases.config:consistency_main"
+oplia-dr-object-plan = "oplia_ctl.replication.config:object_plan_main"
+oplia-dr-image-worker = "oplia_ctl.replication.config:image_worker_main"
+oplia-dr-job-worker = "oplia_ctl.replication.config:job_worker_main"
+oplia-migration-hydrator = "oplia_ctl.migration.sidecar:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "N", "RUF"]
+ignore = ["S101"]  # assert is used in tests only
+
+[tool.ruff.lint.per-file-ignores]
+# Test stubs mirror boto3 keyword names (InstanceIds, ...) because the real API passes them by name.
+# S603: tests run fixed local tools (qemu-img, tar, scripts/*.py) with arguments they build themselves.
+"tests/*" = ["S105", "S106", "S108", "N803", "S603"]
+# Fields ending in *_secret hold the NAME of a secret resolved at runtime, never the secret value.
+"src/oplia_ctl/config.py" = ["S105"]
+"src/oplia_ctl/aiops/config.py" = ["S105"]
+"src/oplia_ctl/finops/config.py" = ["S105"]
+"src/oplia_ctl/identity/config.py" = ["S105"]
+"src/oplia_ctl/dr/*.py" = ["S105", "S608"]
+# SQL text is built only from validated identifiers and SQLGlot-rendered types/expressions; values are bound.
+"src/oplia_ctl/migration/*.py" = ["S608"]
+"src/oplia_ctl/identity/providers/*.py" = ["S105", "S107"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+packages = ["oplia_ctl"]
+mypy_path = "src"

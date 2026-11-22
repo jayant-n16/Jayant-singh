@@ -1,0 +1,11 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: oplia-crdb-ssd
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-ssd
+  replication-type: none
+reclaimPolicy: Retain          # never delete database volumes with the claim
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer

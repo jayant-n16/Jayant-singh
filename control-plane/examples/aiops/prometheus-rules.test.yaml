@@ -1,0 +1,33 @@
+# promtool test rules prometheus-rules.test.yaml
+rule_files: [prometheus-rules.example.yaml]
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_bucket{namespace="shop",service="checkout",le="0.5"}'
+        values: '0+0x20'
+      - series: 'http_server_request_duration_seconds_bucket{namespace="shop",service="checkout",le="1"}'
+        values: '0+0x20'
+      - series: 'http_server_request_duration_seconds_bucket{namespace="shop",service="checkout",le="2"}'
+        values: '0+10x20'
+      - series: 'http_server_request_duration_seconds_bucket{namespace="shop",service="checkout",le="+Inf"}'
+        values: '0+10x20'
+      - series: 'pg_stat_activity_count{datname="orders"}'
+        values: '95x20'
+      - series: 'pg_settings_max_connections'
+        values: '100x20'
+      - series: 'container_cpu_cfs_throttled_periods_total{namespace="shop",pod="checkout-abc"}'
+        values: '0+3x20'
+      - series: 'container_cpu_cfs_periods_total{namespace="shop",pod="checkout-abc"}'
+        values: '0+10x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: CheckoutP99Latency
+        exp_alerts:
+          - exp_labels: {cluster: prod-eks-1, namespace: shop, oplia_workload_kind: Deployment,
+                         oplia_workload_name: checkout, oplia_hpa: checkout, oplia_database: orders,
+                         oplia_metric: p99_latency_ms, alertname: CheckoutP99Latency}
+            exp_annotations:
+              oplia_value: "1989.9999999999998"
+              summary: "checkout p99 latency 1990 ms"
+              oplia_correlated: "{\"db_active_connections_ratio\": 0.95,\n \"cpu_throttle_ratio\": 0.30000000000000004}"

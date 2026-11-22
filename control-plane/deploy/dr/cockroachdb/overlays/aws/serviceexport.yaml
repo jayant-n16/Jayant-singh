@@ -1,0 +1,8 @@
+# Kubernetes Multi-Cluster Services (KEP-1645): exports the headless service to the cluster set so
+# pods are reachable as <pod>.aws.cockroachdb.oplia-data.svc.clusterset.local from every cloud.
+# Requires an MCS implementation spanning the four clouds (e.g. Submariner Lighthouse).
+apiVersion: multicluster.x-k8s.io/v1alpha1
+kind: ServiceExport
+metadata:
+  name: cockroachdb
+  namespace: oplia-data

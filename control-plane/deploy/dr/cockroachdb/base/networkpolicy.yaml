@@ -1,0 +1,27 @@
+# Inter-node traffic arrives from the other clouds through the multi-cluster network (gateway pods),
+# so 26257 is opened to the cluster-mesh CIDRs given in the overlay; clients come from labelled namespaces.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cockroachdb
+spec:
+  podSelector:                      # explicit: kustomize does not fill NetworkPolicy selectors
+    matchLabels:
+      app.kubernetes.io/name: cockroachdb
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cockroachdb
+        - namespaceSelector:
+            matchLabels:
+              oplia.io/database-client: "true"
+      ports:
+        - port: 26257
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8080

@@ -1,0 +1,55 @@
+# Example PrometheusRule rules that carry the labels/annotations the OPLIA Alertmanager adapter expects.
+# Metric names depend on your exporters (kube-state-metrics, cAdvisor, postgres_exporter, node_exporter,
+# your HTTP histogram); adjust expressions before use.
+groups:
+  - name: oplia-aiops
+    rules:
+      - alert: CheckoutP99Latency
+        expr: |
+          1000 * histogram_quantile(0.99,
+            sum by (le) (rate(http_server_request_duration_seconds_bucket{namespace="shop", service="checkout"}[5m]))) > 800
+        for: 5m
+        labels:
+          cluster: prod-eks-1
+          namespace: shop
+          oplia_workload_kind: Deployment
+          oplia_workload_name: checkout
+          oplia_hpa: checkout
+          oplia_database: orders
+          oplia_metric: p99_latency_ms
+        annotations:
+          oplia_value: '{{ $value }}'
+          summary: 'checkout p99 latency {{ $value | printf "%.0f" }} ms'
+          # Correlated metrics let the matrix pick the specific rule (pool flush / HPA) instead of a restart.
+          oplia_correlated: >-
+            {"db_active_connections_ratio": {{ with query "max(pg_stat_activity_count{datname=\"orders\"}) / max(pg_settings_max_connections)" }}{{ . | first | value }}{{ else }}0{{ end }},
+             "cpu_throttle_ratio": {{ with query "sum(rate(container_cpu_cfs_throttled_periods_total{namespace=\"shop\",pod=~\"checkout-.*\"}[5m])) / sum(rate(container_cpu_cfs_periods_total{namespace=\"shop\",pod=~\"checkout-.*\"}[5m]))" }}{{ . | first | value }}{{ else }}0{{ end }}}
+
+      - alert: CheckoutCpuThrottling
+        expr: |
+          sum(rate(container_cpu_cfs_throttled_periods_total{namespace="shop", pod=~"checkout-.*"}[5m]))
+            / sum(rate(container_cpu_cfs_periods_total{namespace="shop", pod=~"checkout-.*"}[5m])) > 0.25
+        for: 10m
+        labels:
+          cluster: prod-eks-1
+          namespace: shop
+          oplia_workload_kind: Deployment
+          oplia_workload_name: checkout
+          oplia_hpa: checkout
+          oplia_metric: cpu_throttle_ratio
+        annotations:
+          oplia_value: '{{ $value }}'
+
+      - alert: CheckoutMemoryPressure
+        expr: |
+          max(container_memory_working_set_bytes{namespace="shop", pod=~"checkout-.*", container!=""}
+            / on (namespace, pod, container) kube_pod_container_resource_limits{resource="memory", namespace="shop"}) >= 0.9
+        for: 5m
+        labels:
+          cluster: prod-eks-1
+          namespace: shop
+          oplia_workload_kind: Deployment
+          oplia_workload_name: checkout
+          oplia_metric: memory_working_set_ratio
+        annotations:
+          oplia_value: '{{ $value }}'

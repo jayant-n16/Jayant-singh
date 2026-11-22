@@ -1,0 +1,12 @@
+# linkerd-edge/linkerd-control-plane 2026.10.2. Trust anchor and issuer are passed with
+# --set-file at install time (from Vault PKI); they are never stored in this repository.
+controllerReplicas: 3
+enablePodAntiAffinity: true
+enablePodDisruptionBudget: true
+proxy:
+  resources:
+    cpu: { request: "100m" }
+    memory: { request: "64Mi", limit: "256Mi" }
+identity:
+  issuer:
+    scheme: linkerd.io/tls

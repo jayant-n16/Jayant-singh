@@ -1,0 +1,155 @@
+// OPLIA drift remediation and TTL teardown for Jenkins (declarative pipeline).
+//
+// Create a "Pipeline from SCM" job pointing at the INFRASTRUCTURE repository and branch,
+// using this Jenkinsfile. The OPLIA control plane calls buildWithParameters after an
+// approved proposal.
+//
+// Safety: plan runs unattended; apply waits at an `input` step that only members of
+// OPLIA_APPROVERS may submit, applies only the reviewed plan file, and concurrent builds
+// are disabled so two remediations can never touch the same state at once.
+// OPERATION=destroy runs `plan -destroy` and additionally requires the job environment
+// variable OPLIA_ALLOW_DESTROY=true; leave it unset for production infrastructure jobs.
+//
+// Requires plugins: Pipeline, Docker Pipeline, Credentials Binding, AWS Credentials,
+// Azure Credentials. Credentials (Manage Jenkins -> Credentials):
+//   oplia-aws-<ACCOUNT_ID>     AWS credentials (prefer a role-assuming identity per account)
+//   oplia-azure-<ACCOUNT_ID>   Azure service principal
+// Job environment: OPLIA_TF_ROOT, OPLIA_AWS_REGION, OPLIA_TF_STATE_BUCKET, OPLIA_TF_LOCK_TABLE,
+//   OPLIA_AZURE_STATE_RG, OPLIA_AZURE_STATE_ACCOUNT, OPLIA_AZURE_STATE_CONTAINER, OPLIA_APPROVERS.
+// Parameters are read as environment variables inside single-quoted sh blocks, so they are
+// never interpolated by Groovy into shell code.
+
+pipeline {
+  agent {
+    docker {
+      image 'hashicorp/terraform:1.9.8'
+      args '--entrypoint='
+    }
+  }
+
+  options {
+    disableConcurrentBuilds()
+    timeout(time: 2, unit: 'HOURS')
+    buildDiscarder(logRotator(numToKeepStr: '50'))
+  }
+
+  parameters {
+    string(name: 'ZONE_NAME', defaultValue: '', description: 'Landing zone to remediate')
+    choice(name: 'CLOUD', choices: ['aws', 'azure'], description: 'Target cloud')
+    string(name: 'ACCOUNT_ID', defaultValue: '', description: 'AWS account id or Azure subscription alias')
+    choice(name: 'BLUEPRINT', choices: ['control-tower-standard', 'alz-hybrid'], description: 'Baseline blueprint')
+    string(name: 'CORRELATION_ID', defaultValue: '', description: 'OPLIA proposal correlation id')
+    choice(name: 'OPERATION', choices: ['remediate', 'destroy'], description: 'remediate drift or destroy an expired stack')
+  }
+
+  environment {
+    TF_IN_AUTOMATION = 'true'
+    TF_INPUT = 'false'
+  }
+
+  stages {
+    stage('Validate') {
+      steps {
+        script {
+          if (!(params.ZONE_NAME ==~ /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/)) { error('invalid ZONE_NAME') }
+          if (!(params.ACCOUNT_ID ==~ /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/)) { error('invalid ACCOUNT_ID') }
+          if (params.CLOUD == 'aws' && !(params.ACCOUNT_ID ==~ /^[0-9]{12}$/)) { error('AWS account must be 12 digits') }
+          if (!(params.CORRELATION_ID ==~ /^[A-Za-z0-9_.:-]{1,64}$/)) { error('invalid CORRELATION_ID') }
+          if (!env.OPLIA_TF_ROOT || env.OPLIA_TF_ROOT.contains('..')) { error('OPLIA_TF_ROOT not set or invalid') }
+          if (!env.OPLIA_APPROVERS) { error('OPLIA_APPROVERS must be set') }
+          if (!(params.OPERATION in ['remediate', 'destroy'])) { error('invalid OPERATION') }
+          if (params.OPERATION == 'destroy' && env.OPLIA_ALLOW_DESTROY != 'true') {
+            error('destroy is not enabled for this job (OPLIA_ALLOW_DESTROY != true)')
+          }
+          env.DESTROY_FLAG = params.OPERATION == 'destroy' ? '-destroy' : ''
+          env.TF_ROOT = "${env.OPLIA_TF_ROOT}/${params.BLUEPRINT}/${params.ZONE_NAME}"
+          env.TF_KEY = "${params.BLUEPRINT}/${params.ZONE_NAME}/${params.ACCOUNT_ID}.tfstate"
+          currentBuild.displayName = "#${env.BUILD_NUMBER} ${params.CORRELATION_ID}"
+        }
+        sh 'test -d "$TF_ROOT" || { echo "Terraform root $TF_ROOT not found"; exit 1; }'
+      }
+    }
+
+    stage('Plan') {
+      steps {
+        script {
+          withCloudCredentials {
+            sh '''
+              set -eu
+              if [ "$CLOUD" = "aws" ]; then
+                terraform -chdir="$TF_ROOT" init -input=false \
+                  -backend-config="bucket=$OPLIA_TF_STATE_BUCKET" -backend-config="key=$TF_KEY" \
+                  -backend-config="region=$OPLIA_AWS_REGION" \
+                  -backend-config="dynamodb_table=${OPLIA_TF_LOCK_TABLE:-terraform-state-lock}" \
+                  -backend-config="encrypt=true"
+              else
+                terraform -chdir="$TF_ROOT" init -input=false \
+                  -backend-config="resource_group_name=$OPLIA_AZURE_STATE_RG" \
+                  -backend-config="storage_account_name=$OPLIA_AZURE_STATE_ACCOUNT" \
+                  -backend-config="container_name=$OPLIA_AZURE_STATE_CONTAINER" -backend-config="key=$TF_KEY"
+              fi
+            '''
+            int rc = sh(returnStatus: true,
+                        script: 'terraform -chdir="$TF_ROOT" plan -input=false -lock-timeout=5m -detailed-exitcode $DESTROY_FLAG -out=tfplan')
+            if (rc == 0) {
+              env.TF_CHANGES = 'false'
+              echo "Nothing to ${params.OPERATION}."
+            } else if (rc == 2) {
+              env.TF_CHANGES = 'true'
+              sh 'terraform -chdir="$TF_ROOT" show -no-color tfplan | tail -n 400'
+            } else {
+              error("terraform plan failed (${rc})")
+            }
+          }
+        }
+      }
+    }
+
+    stage('Approve') {
+      when { expression { env.TF_CHANGES == 'true' } }
+      steps {
+        timeout(time: 60, unit: 'MINUTES') {
+          input(message: "Apply OPLIA ${params.OPERATION.toUpperCase()} ${params.CORRELATION_ID} to ${params.ZONE_NAME}?",
+                ok: 'Apply reviewed plan', submitter: env.OPLIA_APPROVERS)
+        }
+      }
+    }
+
+    stage('Apply') {
+      when { expression { env.TF_CHANGES == 'true' } }
+      steps {
+        script {
+          withCloudCredentials {
+            sh 'terraform -chdir="$TF_ROOT" apply -input=false -lock-timeout=5m tfplan'
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'if [ -n "${TF_ROOT:-}" ]; then rm -f "$TF_ROOT/tfplan"; fi'
+    }
+  }
+}
+
+// Binds credentials for the selected cloud only, for the duration of the closure.
+def withCloudCredentials(Closure body) {
+  if (params.CLOUD == 'aws') {
+    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding',
+                      credentialsId: "oplia-aws-${params.ACCOUNT_ID}",
+                      accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+      withEnv(["AWS_REGION=${env.OPLIA_AWS_REGION}"]) { body() }
+    }
+  } else {
+    withCredentials([azureServicePrincipal(credentialsId: "oplia-azure-${params.ACCOUNT_ID}",
+                                           subscriptionIdVariable: 'ARM_SUBSCRIPTION_ID',
+                                           clientIdVariable: 'ARM_CLIENT_ID',
+                                           clientSecretVariable: 'ARM_CLIENT_SECRET',
+                                           tenantIdVariable: 'ARM_TENANT_ID')]) {
+      body()
+    }
+  }
+}

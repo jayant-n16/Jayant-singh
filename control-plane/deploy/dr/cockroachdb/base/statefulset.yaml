@@ -1,0 +1,131 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cockroachdb
+spec:
+  serviceName: cockroachdb
+  replicas: 3                      # 3 nodes per cloud x 4 clouds = 12 nodes, one Raft replica per region
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels: {}
+  template:
+    metadata:
+      labels: {}
+    spec:
+      serviceAccountName: cockroachdb
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 300   # time to drain leases on SIGTERM
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cockroachdb
+      initContainers:
+        # CockroachDB refuses keys readable by group/others; copy them with 0400 owned by uid 1000
+        - name: copy-certs
+          image: cockroachdb/cockroach:v25.4.21   # pin by digest in your pipeline
+          command: ["/bin/bash", "-ecx", "cp /certs-src/* /cockroach/cockroach-certs/ && chmod 0400 /cockroach/cockroach-certs/*"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: certs-src
+              mountPath: /certs-src
+              readOnly: true
+            - name: certs
+              mountPath: /cockroach/cockroach-certs
+      containers:
+        - name: cockroachdb
+          image: cockroachdb/cockroach:v25.4.21   # pin by digest in your pipeline
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: grpc
+              containerPort: 26257
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: COCKROACH_CHANNEL
+              value: kubernetes-multiregion
+          envFrom:
+            - configMapRef:
+                name: cockroachdb-topology    # CLUSTER_ID, LOCALITY, JOIN (per cloud overlay)
+          command:
+            - /bin/bash
+            - -ecx
+            - >-
+              exec /cockroach/cockroach start
+              --certs-dir=/cockroach/cockroach-certs
+              --advertise-host=${POD_NAME}.${CLUSTER_ID}.cockroachdb.${NAMESPACE}.svc.clusterset.local
+              --http-addr=0.0.0.0:8080
+              --listen-addr=0.0.0.0:26257
+              --locality=${LOCALITY}
+              --join=${JOIN}
+              --cache=25% --max-sql-memory=25%
+              --logtostderr=INFO
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              memory: 16Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /health?ready=1
+              port: http
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          volumeMounts:
+            - name: datadir
+              mountPath: /cockroach/cockroach-data
+            - name: certs
+              mountPath: /cockroach/cockroach-certs
+      volumes:
+        - name: certs-src
+          secret:
+            secretName: cockroachdb-node-certs   # ca.crt, node.crt, node.key (SANs: see README)
+            defaultMode: 0440
+        - name: certs
+          emptyDir:
+            medium: Memory
+  volumeClaimTemplates:
+    - metadata:
+        name: datadir
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: oplia-crdb-ssd          # defined per cloud in the overlay
+        resources:
+          requests:
+            storage: 500Gi

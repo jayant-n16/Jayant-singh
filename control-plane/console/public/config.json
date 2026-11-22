@@ -1,0 +1,7 @@
+{
+  "authority": "http://127.0.0.1:8090/",
+  "clientId": "oplia-console",
+  "scope": "openid profile",
+  "apiBase": "/api",
+  "environmentLabel": "Local development"
+}

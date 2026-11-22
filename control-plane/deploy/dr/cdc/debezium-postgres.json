@@ -1,0 +1,19 @@
+{
+  "name": "oplia-dr-postgres-orders",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "plugin.name": "pgoutput",
+    "database.hostname": "orders-pg.primary.internal",
+    "database.port": "5432",
+    "database.user": "debezium",
+    "database.password": "${file:/opt/kafka/secrets/orders-pg.properties:password}",
+    "database.dbname": "orders",
+    "topic.prefix": "cdc",
+    "publication.autocreate.mode": "filtered",
+    "table.include.list": "public.accounts,public.orders",
+    "skipped.operations": "none",
+    "tombstones.on.delete": "true",
+    "provide.transaction.metadata": "true",
+    "database.sslmode": "verify-full"
+  }
+}

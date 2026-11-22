@@ -1,0 +1,145 @@
+# JIT access: grants approved requests and revokes expired ones every 60 s.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oplia-jit-worker
+  labels:
+    app.kubernetes.io/name: oplia-jit-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single active worker
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oplia-jit-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oplia-jit-worker
+    spec:
+      serviceAccountName: oplia-control-plane
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+          command: ["oplia-jit-worker"]
+          envFrom:
+            - configMapRef:
+                name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+            - configMapRef:
+                name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+            - secretRef:
+                name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+          env:
+            - name: OPLIA_SECRET_PROVIDER
+              value: vault
+            - name: OPLIA_VAULT_AUTH_METHOD
+              value: kubernetes
+            - name: OPLIA_VAULT_KUBERNETES_ROLE
+              value: oplia-control-plane
+            - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+              value: /var/run/secrets/vault/token
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: vault-token
+              mountPath: /var/run/secrets/vault
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+---
+# AIOps predictive escalation.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oplia-aiops-escalator
+  labels:
+    app.kubernetes.io/name: oplia-aiops-escalator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single active worker
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oplia-aiops-escalator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oplia-aiops-escalator
+    spec:
+      serviceAccountName: oplia-control-plane
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: oplia-control-plane:REPLACE_WITH_RELEASE   # pin by digest
+          command: ["oplia-aiops-escalator"]
+          envFrom:
+            - configMapRef:
+                name: oplia-config             # OPLIA_* non-secret settings (OIDC, CI/CD target, phase settings)
+            - configMapRef:
+                name: oplia-vault              # OPLIA_VAULT_* (examples/vault/vault.env.example)
+            - secretRef:
+                name: oplia-control-plane-env  # OPLIA_DATABASE_URL only; every other secret comes from Vault
+          env:
+            - name: OPLIA_SECRET_PROVIDER
+              value: vault
+            - name: OPLIA_VAULT_AUTH_METHOD
+              value: kubernetes
+            - name: OPLIA_VAULT_KUBERNETES_ROLE
+              value: oplia-control-plane
+            - name: OPLIA_VAULT_KUBERNETES_JWT_FILE
+              value: /var/run/secrets/vault/token
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: vault-token
+              mountPath: /var/run/secrets/vault
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: vault-token            # short-lived, auto-rotated token used only for the Vault login
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600

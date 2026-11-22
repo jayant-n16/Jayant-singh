@@ -1,0 +1,13 @@
+# On the accepting cluster; the token lands in the named secret, copy it to the dialing cluster
+# and apply a PeeringDialer there with the same secret name.
+apiVersion: consul.hashicorp.com/v1alpha1
+kind: PeeringAcceptor
+metadata:
+  name: peer-cluster
+  namespace: consul
+spec:
+  peer:
+    secret:
+      name: peering-token-peer-cluster
+      key: data
+      backend: kubernetes
