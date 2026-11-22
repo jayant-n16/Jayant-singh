@@ -115,6 +115,26 @@ def test_pg_schema_difference_does_not_hide_changed_data(gate, session_factory, 
     assert r["status"] == "DRIFT" and "different data" not in r["summary"]
 
 
+def test_repeated_checks_of_the_same_drift_reuse_one_proposal(gate, session_factory, pg_pair):
+    conns, secrets = pg_pair
+    conns["cc_dr"].execute("DELETE FROM orders WHERE id = 3")
+    _reg, checker = _checker(gate, session_factory, _specs("postgres", "cc_src", "cc_dr"), secrets)
+    first = checker.run("dr", triggered_by="alice")
+    again = checker.run("dr", triggered_by="alice")
+    assert first["proposal_id"] and again["proposal_id"] == first["proposal_id"]
+    assert again["report"]["resync_proposal_reused"] is True
+    assert len([p for p in gate.list() if p.action_type == ACTION_DR_RESYNC]) == 1
+    gate.approve(first["proposal_id"], "bob")                       # still open (APPROVED): reused
+    assert checker.run("dr", triggered_by="alice")["proposal_id"] == first["proposal_id"]
+    conns["cc_dr"].execute("DELETE FROM orders WHERE id = 4")      # more rows of the same table: same resync
+    assert checker.run("dr", triggered_by="alice")["proposal_id"] == first["proposal_id"]
+    conns["cc_dr"].execute("DELETE FROM lines WHERE order_id = 7")  # another table: a different resync
+    other = checker.run("dr", triggered_by="alice")
+    assert other["proposal_id"] != first["proposal_id"]
+    gate.reject(other["proposal_id"], "bob")                        # decided: the next check proposes again
+    assert checker.run("dr", triggered_by="alice")["proposal_id"] not in (first["proposal_id"], other["proposal_id"])
+
+
 def test_pg_resync_refuses_a_locked_target(gate, session_factory, pg_pair):
     conns, secrets = pg_pair
     conns["cc_dr"].execute("DELETE FROM orders WHERE id = 1")

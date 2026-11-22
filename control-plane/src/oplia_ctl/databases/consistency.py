@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from oplia_ctl.databases.models import ConsistencyRunRow
 from oplia_ctl.databases.registry import DatabaseRegistry, DatabaseSpec, _scrub, _txt
 from oplia_ctl.db import session_scope
-from oplia_ctl.safety import SafetyGate
+from oplia_ctl.safety import ProposalStatus, SafetyGate
 
 ACTION_DR_RESYNC = "dr.resync"
 _SAFE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")
@@ -365,13 +365,21 @@ class ConsistencyChecker:
             else:
                 summary = f"{len(report['tables'])} table(s) identical"
             if findings and not (breaker and breaker.get("state") == "OPEN"):
-                p = self._gate.propose(
-                    action_type=ACTION_DR_RESYNC, target=f"{src.name}->{dst.name}",
-                    payload={"source": src.name, "target": dst.name,
-                             "tables": drift_tables, "schema_issues": [s["table"] for s in report["schema"]]},
-                    reason=f"DR consistency check found drift between {src.name} and {dst.name}: {summary}"[:2000],
-                    requested_by="consistency-checker", idempotency_key=f"dr-resync:{run_id}")
-                proposal_id = p.id
+                payload = {"source": src.name, "target": dst.name,
+                           "tables": drift_tables, "schema_issues": [s["table"] for s in report["schema"]]}
+                prefix = f"dr-resync:{src.name}->{dst.name}:"
+                open_one = self._gate.latest_by_idempotency_prefix(prefix)
+                if (open_one is not None and open_one[0].status in (ProposalStatus.PENDING, ProposalStatus.APPROVED)
+                        and open_one[0].payload == payload):
+                    # the same drift is already waiting for a decision: link this run to it, never a duplicate
+                    proposal_id = open_one[0].id
+                    report["resync_proposal_reused"] = True
+                else:
+                    p = self._gate.propose(
+                        action_type=ACTION_DR_RESYNC, target=f"{src.name}->{dst.name}", payload=payload,
+                        reason=f"DR consistency check found drift between {src.name} and {dst.name}: {summary}"[:2000],
+                        requested_by="consistency-checker", idempotency_key=f"{prefix}{run_id}")
+                    proposal_id = p.id
         except Exception as exc:
             status = "FAILED"
             summary = _scrub(f"{type(exc).__name__}: {exc}", "")
