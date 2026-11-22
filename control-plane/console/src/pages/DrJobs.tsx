@@ -58,6 +58,26 @@ export function verdictOf(j: DrJob): string | null {
   return j.kind === "parity_check" && (r.status === "MATCH" || r.status === "DIFF") ? r.status : null;
 }
 
+/** Every DR job type, what it needs and the setting that enables it (shown while none is configured). */
+export const DR_JOB_TYPES: { title: string; setting: string; needs: string }[] = [
+  { title: "Restore drill", setting: "OPLIA_REPLICATION_DRILLS",
+    needs: "A sandbox subnet in AWS, Azure or GCP where a replicated image is booted (no public IP), checked and torn down." },
+  { title: "Container image copy", setting: "OPLIA_REPLICATION_REGISTRIES",
+    needs: "Source and target registries (ECR, ACR, Artifact Registry or any OCI registry) and their credentials." },
+  { title: "Kubernetes backup and DR restore", setting: "OPLIA_REPLICATION_VELERO",
+    needs: "Velero with its node agent and provider plugin in both clusters, and a replicated backup bucket." },
+  { title: "Vault snapshot to DR", setting: "OPLIA_REPLICATION_VAULT",
+    needs: "A Vault or OpenBao cluster on integrated (Raft) storage and a DR object store." },
+  { title: "DNS failover", setting: "OPLIA_REPLICATION_DNS",
+    needs: "Route 53 or Traffic Manager failover records (Terraform modules provided); Cloud DNS fails over automatically only." },
+  { title: "Firewall translation", setting: "OPLIA_REPLICATION_FIREWALL",
+    needs: "Source and target security groups, NSGs or VPC firewalls. IAM is reported only, never applied." },
+  { title: "File-share replication", setting: "OPLIA_REPLICATION_FILESHARES",
+    needs: "Both shares (EFS, Azure Files, Filestore) mounted into the oplia-dr-job-worker pod." },
+  { title: "Message queue relay", setting: "OPLIA_REPLICATION_QUEUES",
+    needs: "Source and target queues (SQS/SNS, Service Bus, Pub/Sub) and their credentials." },
+];
+
 const DR_INTRO = "Long-running DR jobs run by the oplia-dr-job-worker CronJob one persisted step at a time. Starting one creates a proposal: another approver approves, an operator executes, then the worker takes over.";
 
 /** Persisted-step job modules from GET /dr/jobs: DR modules (default) or the migration engine (``migration``). */
@@ -79,7 +99,21 @@ export default function DrJobs({ migration = false }: { migration?: boolean }) {
       />
       <ErrorNote error={st.error} />
       {st.loading && !st.data ? <Loading what={migration ? "migration jobs" : "DR jobs"} /> : null}
-      {st.data && modules.length === 0 ? <Empty>No {migration ? "migration" : "DR job"} module is configured on this control plane.</Empty> : null}
+      {st.data && modules.length === 0 && migration ? <Empty>No migration module is configured on this control plane.</Empty> : null}
+      {!migration && !st.loading && modules.length === 0 ? (
+        <>
+          <p>No DR job type is configured on this control plane. Each type below is switched on by its setting (a JSON value; see the
+            README), on the API and on the oplia-dr-job-worker CronJob, and needs a real target to work on:</p>
+          <TableWrap label="DR job types">
+            <thead><tr><th>Job type</th><th>Setting</th><th>Needs</th></tr></thead>
+            <tbody>
+              {DR_JOB_TYPES.map((t) => (
+                <tr key={t.setting}><td>{t.title}</td><td className="mono">{t.setting}</td><td className="wrap">{t.needs}</td></tr>
+              ))}
+            </tbody>
+          </TableWrap>
+        </>
+      ) : null}
       {modules.map((m) => (
         <section key={m.kind} aria-label={m.title}>
           <h2>{m.title}</h2>

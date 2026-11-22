@@ -105,3 +105,17 @@ describe("DR jobs", () => {
       params: { cloud: "aws", image: "ami-0123456789abcdef0", checks: "tcp:22" }, reason: "monthly drill" }));
   });
 });
+
+describe("DR jobs with no job type configured", () => {
+  it("lists every job type with its setting instead of a bare message", async () => {
+    const { api } = fakeApi([{ method: "GET", path: "/dr/jobs", reply: { modules: [
+      { kind: "parity_check", title: "Parity check", action: "migration.parity_check", fields: [], summary: {}, jobs: [] }] } }]);
+    renderAt(<DrJobs />, { api, user: me({}, { approve: false, operate: true }) });
+    expect(await screen.findByText(/No DR job type is configured/)).toBeInTheDocument();
+    for (const s of ["OPLIA_REPLICATION_DRILLS", "OPLIA_REPLICATION_REGISTRIES", "OPLIA_REPLICATION_VELERO", "OPLIA_REPLICATION_VAULT",
+      "OPLIA_REPLICATION_DNS", "OPLIA_REPLICATION_FIREWALL", "OPLIA_REPLICATION_FILESHARES", "OPLIA_REPLICATION_QUEUES"]) {
+      expect(screen.getByText(s)).toBeInTheDocument();
+    }
+    expect(screen.queryByText("Parity check")).toBeNull();   // migration modules stay on the Migration screen
+  });
+});
